@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; color: #202124; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    p { line-height: 1.4; }
+    button { background: #1a73e8; border: 0; border-radius: 4px; color: white; cursor: pointer; font-weight: 600; padding: 10px 12px; width: 100%; }
+    button:disabled { background: #9aa0a6; cursor: wait; }
+    .card { border: 1px solid #dadce0; border-radius: 8px; margin-top: 12px; padding: 12px; }
+    .metric { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f1f3f4; }
+    .metric:last-child { border-bottom: 0; }
+    .label { color: #5f6368; }
+    .value { font-weight: 700; }
+    .status { margin-top: 10px; color: #5f6368; font-size: 12px; }
+    .error { color: #b3261e; }
+    ul { padding-left: 18px; }
+  </style>
+</head>
+<body>
+  <h1>G4G Enrollment Tracker</h1>
+  <p>Use this panel to refresh the Sheet after raw QuestionPro rows are imported or after follow-up statuses are updated.</p>
+
+  <button id="refreshButton" onclick="refreshTracker()">Refresh tracker</button>
+  <div id="status" class="status">Loading current counts…</div>
+
+  <div class="card" id="summaryCard" style="display:none;">
+    <div class="metric"><span class="label">Prescreening clean rows</span><span class="value" id="prescreening">0</span></div>
+    <div class="metric"><span class="label">Consent clean rows</span><span class="value" id="consent">0</span></div>
+    <div class="metric"><span class="label">Master records</span><span class="value" id="master">0</span></div>
+    <div class="metric"><span class="label">Follow-up needed</span><span class="value" id="followupNeeded">0</span></div>
+    <div class="metric"><span class="label">Follow-up completed</span><span class="value" id="followupCompleted">0</span></div>
+    <div class="metric"><span class="label">Ready for DARTS</span><span class="value" id="readyForDarts">0</span></div>
+  </div>
+
+  <div class="card">
+    <strong>Phase 1 use</strong>
+    <ul>
+      <li>Keep raw tabs as the audit trail.</li>
+      <li>Work follow-ups from <code>Followup_Queue</code>.</li>
+      <li>Do not use this tool to send email yet.</li>
+    </ul>
+  </div>
+
+  <script>
+    function setBusy(isBusy, message) {
+      document.getElementById('refreshButton').disabled = isBusy;
+      document.getElementById('status').textContent = message || '';
+      document.getElementById('status').className = 'status';
+    }
+
+    function showError(error) {
+      document.getElementById('refreshButton').disabled = false;
+      const status = document.getElementById('status');
+      status.className = 'status error';
+      status.textContent = error && error.message ? error.message : String(error);
+    }
+
+    function renderSummary(summary) {
+      ['prescreening', 'consent', 'master', 'followupNeeded', 'followupCompleted', 'readyForDarts'].forEach(function (key) {
+        document.getElementById(key).textContent = summary[key];
+      });
+      document.getElementById('summaryCard').style.display = 'block';
+      setBusy(false, 'Last updated: ' + new Date(summary.generatedAt).toLocaleString());
+    }
+
+    function refreshTracker() {
+      setBusy(true, 'Refreshing tracker…');
+      google.script.run
+        .withSuccessHandler(renderSummary)
+        .withFailureHandler(showError)
+        .refreshFromSidebar();
+    }
+
+    google.script.run
+      .withSuccessHandler(renderSummary)
+      .withFailureHandler(showError)
+      .getTrackerSummary();
+  </script>
+</body>
+</html>
