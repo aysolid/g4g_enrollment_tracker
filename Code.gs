@@ -66,7 +66,9 @@ function getTrackerSummary() {
     followupNeeded: countWhere_(ss, SHEETS.MASTER, 'Follow Up Needed', 'Yes'),
     followupCompleted: countWhere_(ss, SHEETS.FOLLOWUP, 'Follow Up Status', 'Completed'),
     readyForDarts: countWhere_(ss, SHEETS.MASTER, 'Ready for DARTS', 'Yes'),
-    generatedAt: new Date().toISOString()
+    generatedAt: new Date().toISOString(),
+    webAppUrl: getWebAppUrl_(),
+    setup: getSheetSetupStatus_()
   };
 }
 
@@ -76,6 +78,38 @@ function refreshFromSidebar() {
   return getTrackerSummary();
 }
 
+
+
+function getSheetSetupStatus_() {
+  const ss = SpreadsheetApp.getActive();
+  const missingSheets = Object.values(SHEETS).filter(name => !ss.getSheetByName(name));
+  const requiredRawHeaders = {
+    [SHEETS.PRESCREEN_RAW]: ['Response ID', 'Timestamp (mm/dd/yyyy)'],
+    [SHEETS.CONSENT_RAW]: ['Response ID', 'Timestamp (mm/dd/yyyy)']
+  };
+  const missingHeaders = [];
+  Object.keys(requiredRawHeaders).forEach(sheetName => {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return;
+    const headers = sheet.getRange(RAW_HEADER_ROW, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+    requiredRawHeaders[sheetName].forEach(header => {
+      if (!headers.includes(header)) missingHeaders.push(`${sheetName}: ${header}`);
+    });
+  });
+  return {
+    ok: missingSheets.length === 0 && missingHeaders.length === 0,
+    missingSheets,
+    missingHeaders
+  };
+}
+
+function getWebAppUrl_() {
+  try {
+    return ScriptApp.getService().getUrl() || '';
+  } catch (err) {
+    return '';
+  }
+}
 
 /** Serves the deployed web app URL. This prevents "Script function not found: doGet". */
 function doGet(e) {
