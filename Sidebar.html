@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; color: #202124; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    h2 { font-size: 15px; margin: 0 0 8px; }
+    p, li { line-height: 1.4; }
+    code { background: #f1f3f4; border-radius: 3px; padding: 1px 4px; }
+    button { background: #1a73e8; border: 0; border-radius: 4px; color: white; cursor: pointer; font-weight: 600; padding: 10px 12px; width: 100%; }
+    button:disabled { background: #9aa0a6; cursor: wait; }
+    input { border: 1px solid #dadce0; border-radius: 4px; box-sizing: border-box; font-size: 12px; padding: 8px; width: 100%; }
+    .card { border: 1px solid #dadce0; border-radius: 8px; margin-top: 12px; padding: 12px; }
+    .metric { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f1f3f4; }
+    .metric:last-child { border-bottom: 0; }
+    .label { color: #5f6368; }
+    .value { font-weight: 700; }
+    .status { margin-top: 10px; color: #5f6368; font-size: 12px; }
+    .error { color: #b3261e; }
+    .ok { color: #137333; }
+    .warn { color: #b06000; }
+    ul, ol { padding-left: 20px; }
+  </style>
+</head>
+<body>
+  <h1>G4G Enrollment Tracker</h1>
+  <p>Use this panel to refresh the Sheet after raw QuestionPro rows are imported or after follow-up statuses are updated.</p>
+
+  <button id="refreshButton" onclick="refreshTracker()">Refresh tracker</button>
+  <div id="status" class="status">Loading current counts…</div>
+
+  <div class="card" id="setupCard">
+    <h2>Setup status</h2>
+    <div id="setupStatus" class="status">Checking Sheet structure…</div>
+  </div>
+
+  <div class="card" id="summaryCard" style="display:none;">
+    <div class="metric"><span class="label">Prescreening clean rows</span><span class="value" id="prescreening">0</span></div>
+    <div class="metric"><span class="label">Consent clean rows</span><span class="value" id="consent">0</span></div>
+    <div class="metric"><span class="label">Master records</span><span class="value" id="master">0</span></div>
+    <div class="metric"><span class="label">Follow-up needed</span><span class="value" id="followupNeeded">0</span></div>
+    <div class="metric"><span class="label">Follow-up completed</span><span class="value" id="followupCompleted">0</span></div>
+    <div class="metric"><span class="label">Ready for DARTS</span><span class="value" id="readyForDarts">0</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Next steps</h2>
+    <ol>
+      <li>Open the Google Sheet, then run <strong>G4G Tracker → Refresh tracker from raw tabs</strong> once.</li>
+      <li>Confirm the raw tabs have the QuestionPro header row in row 2 and response data starting in row 3.</li>
+      <li>Import one prescreening export row into <code>Prescreening_Raw</code>, refresh, and confirm it appears in <code>Prescreening_Clean</code> and <code>Master_Enrollment</code>.</li>
+      <li>If the row says the child is neurodivergent or needs supports, confirm it appears in <code>Followup_Queue</code>.</li>
+      <li>Import one matching consent export row into <code>Consent_Raw</code>, refresh, and confirm consent status updates in <code>Master_Enrollment</code>.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>QuestionPro webhook setup</h2>
+    <p>Use the deployed web app URL below as the webhook endpoint for both QuestionPro forms. Configure each webhook to send a <strong>POST</strong> request with the full response payload as JSON.</p>
+    <input id="webAppUrl" readonly value="Loading URL…" onclick="this.select()">
+    <ul>
+      <li>Prescreening form webhook → this URL → response should land in <code>Prescreening_Raw</code>.</li>
+      <li>Consent form webhook → this URL → response should land in <code>Consent_Raw</code>.</li>
+      <li>If QuestionPro asks for content type, choose <code>application/json</code>.</li>
+      <li>After saving each webhook, submit a test response and click <strong>Refresh tracker</strong>.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Phase 1 use</h2>
+    <ul>
+      <li>Keep raw tabs as the audit trail.</li>
+      <li>Work follow-ups from <code>Followup_Queue</code>.</li>
+      <li>Manually update follow-up status/date/assignee/notes in the queue.</li>
+      <li>Do not use this tool to send email yet.</li>
+    </ul>
+  </div>
+
+  <script>
+    function setBusy(isBusy, message) {
+      document.getElementById('refreshButton').disabled = isBusy;
+      document.getElementById('status').textContent = message || '';
+      document.getElementById('status').className = 'status';
+    }
+
+    function showError(error) {
+      document.getElementById('refreshButton').disabled = false;
+      const status = document.getElementById('status');
+      status.className = 'status error';
+      status.textContent = error && error.message ? error.message : String(error);
+    }
+
+    function renderSetup(setup) {
+      const el = document.getElementById('setupStatus');
+      if (setup && setup.ok) {
+        el.className = 'status ok';
+        el.textContent = 'Sheet structure looks ready.';
+        return;
+      }
+      const missingSheets = setup && setup.missingSheets ? setup.missingSheets : [];
+      const missingHeaders = setup && setup.missingHeaders ? setup.missingHeaders : [];
+      el.className = 'status warn';
+      el.textContent = 'Review setup: missing sheets [' + missingSheets.join(', ') + '] missing headers [' + missingHeaders.join(', ') + ']';
+    }
+
+    function renderSummary(summary) {
+      ['prescreening', 'consent', 'master', 'followupNeeded', 'followupCompleted', 'readyForDarts'].forEach(function (key) {
+        document.getElementById(key).textContent = summary[key];
+      });
+      document.getElementById('summaryCard').style.display = 'block';
+      document.getElementById('webAppUrl').value = summary.webAppUrl || window.location.href;
+      renderSetup(summary.setup);
+      setBusy(false, 'Last updated: ' + new Date(summary.generatedAt).toLocaleString());
+    }
+
+    function refreshTracker() {
+      setBusy(true, 'Refreshing tracker…');
+      google.script.run
+        .withSuccessHandler(renderSummary)
+        .withFailureHandler(showError)
+        .refreshFromSidebar();
+    }
+
+    google.script.run
+      .withSuccessHandler(renderSummary)
+      .withFailureHandler(showError)
+      .getTrackerSummary();
+  </script>
+</body>
+</html>
