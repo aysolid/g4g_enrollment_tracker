@@ -1,6 +1,6 @@
 # Gaming4Good Enrollment Tracker Apps Script
 
-This repository contains the Phase 1 Google Apps Script automation for the existing Google Sheet tracker.
+This repository contains the Phase 1 Google Apps Script automation for the existing Google Sheet tracker. In the Apps Script editor, create/paste only the files `Code.gs` and `Sidebar.html`.
 
 ## How the workbook is intended to work
 
@@ -15,7 +15,7 @@ This repository contains the Phase 1 Google Apps Script automation for the exist
 ## Phase 1 operating workflow
 
 1. Import QuestionPro exports into the raw tabs or deploy `doPost` as a web app for webhook intake.
-2. In Google Sheets, use **G4G Tracker → Refresh tracker from raw tabs**.
+2. In Google Sheets, use **G4G Tracker → Open tracker sidebar** or **G4G Tracker → Refresh tracker from raw tabs**.
 3. Review `Followup_Queue` for rows with `Follow Up Status = Not Started`.
 4. Manually contact parents outside this app. Phase 1 does not send email.
 5. Update `Followup_Queue` fields such as `Email Drafted`, `Email Sent Date`, `Follow Up Status`, `Follow Up Completed Date`, `Assigned To`, and `Notes`.
@@ -32,3 +32,7 @@ Suggested manual checks:
 - Updating that queue row to `Completed` is preserved after refresh.
 - A matching consent row changes `Consent Status` in `Master_Enrollment` to `Completed`.
 - A participant is listed in `Ready_For_DARTS` only when consent is complete and required follow-up is either complete or not needed.
+
+## Apps Script file layout
+
+This project intentionally includes only `.gs` and `.html` source files for the Apps Script editor. Configure deployment settings directly in the Apps Script UI when you publish the web app.
