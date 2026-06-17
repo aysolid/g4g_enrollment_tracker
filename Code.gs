@@ -76,6 +76,14 @@ function refreshFromSidebar() {
   return getTrackerSummary();
 }
 
+
+/** Serves the deployed web app URL. This prevents "Script function not found: doGet". */
+function doGet(e) {
+  return HtmlService.createHtmlOutputFromFile('Sidebar')
+    .setTitle('G4G Enrollment Tracker')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
 /** Receives QuestionPro webhook payloads. Deploy as a web app for webhook use. */
 function doPost(e) {
   try {
