@@ -189,7 +189,8 @@ function refreshDashboard() {
 
 function normalizePrescreening_(raw, index, config) {
   const responseId = getFirst_(raw, ['Response ID', 'ResponseID']) || `P-MANUAL-${index}`;
-  const neuro = getByContains_(raw, ['identify as neurodivergent', 'diagnosed disability', 'learning difference']);
+  const neuroRaw = getByContains_(raw, ['identify as neurodivergent', 'diagnosed disability', 'learning difference']);
+  const neuro = decodeQuestionProNeuroResponse_(neuroRaw);
   const conditions = collectOptionValues_(raw, ['Autism', 'ADHD', 'Dyslexia', 'Intellectual disability', 'Developmental disability', 'Epilepsy', 'Traumatic brain injury', 'OCD', 'Down Syndrome', 'Other genetic condition', 'Other (Please specify)']);
   const physicalSupports = getByContains_(raw, ['physically disabled', 'additional supports']);
   const followUpNeeded = needsFollowup_(neuro, conditions, physicalSupports, config) ? 'Yes' : 'No';
@@ -245,7 +246,7 @@ function normalizeConsent_(raw, index, config) {
     'School': getByContains_(raw, ['school your child attends']),
     'Grade': getByContains_(raw, ['What grade is your child in']),
     'IEP/504': getByContains_(raw, ['IEP', '504 plan']),
-    'Neurodivergent Response': getByContains_(raw, ['Is your child neurodivergent']),
+    'Neurodivergent Response': decodeQuestionProNeuroResponse_(getByContains_(raw, ['Is your child neurodivergent'])),
     'Relevant Disabilities': collectOptionValues_(raw, ['Autism', 'ADD/ADHD', 'Epilepsy', 'Down Syndrome', 'OCD', 'Generalized Anxiety', 'Other']),
     'Accommodation Needs': getByContains_(raw, ['special needs', 'specific accommodations']),
     'Parent Education': getByContains_(raw, ['highest level of education']),
@@ -410,6 +411,21 @@ function collectOptionValues_(obj, options) {
   });
   return [...new Set(found)].join('; ');
 }
+
+/**
+ * QuestionPro stores the prescreening neurodivergence question as numeric choices:
+ * 1 = No (child is not neurodivergent), 2 = Yes (child is neurodivergent).
+ * Preserve readable Yes/No values in clean/master tabs so follow-up decisions are correct.
+ */
+function decodeQuestionProNeuroResponse_(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === '1') return 'No';
+  if (normalized === '2') return 'Yes';
+  if (/^no\b/.test(normalized)) return 'No';
+  if (/^yes\b/.test(normalized)) return 'Yes';
+  return value || '';
+}
+
 function needsFollowup_(neuro, conditions, physicalSupports, config) {
   return [neuro, conditions, physicalSupports].some(v => /\byes\b|autism|adhd|dyslexia|disability|iep|504|support|accommodation|diagnos/i.test(String(v || '')));
 }
