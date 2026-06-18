@@ -478,8 +478,42 @@ function parseFormEncoded_(contents) {
 }
 function appendRawPayload_(formType, payload) {
   const flattened = flattenPayload_(payload);
+  Object.assign(flattened, extractQuestionProResponseSet_(payload));
+  removeRoutingOnlyFields_(flattened);
   flattened._rawPayload = JSON.stringify(payload);
   appendRawObjectForTest_(formType === 'Consent' ? SHEETS.CONSENT_RAW : SHEETS.PRESCREEN_RAW, flattened);
+}
+
+function removeRoutingOnlyFields_(obj) {
+  ['form', 'formType', 'surveyType'].forEach(key => delete obj[key]);
+}
+function extractQuestionProResponseSet_(payload) {
+  const out = {};
+  const responseSet = Array.isArray(payload.responseSet) ? payload.responseSet : [];
+  responseSet.forEach(item => {
+    const key = item.questionText || item.questionDescription || item.questionCode || item.questionID;
+    const value = extractQuestionProAnswer_(item);
+    if (key && value !== '') out[key] = value;
+    if (item.questionCode && value !== '') out[item.questionCode] = value;
+  });
+  return out;
+}
+function extractQuestionProAnswer_(item) {
+  const directFields = ['answerText', 'answer', 'responseText', 'response', 'value', 'selectedAnswer', 'displayText'];
+  for (const field of directFields) {
+    if (item[field] !== undefined && item[field] !== null && String(item[field]).trim() !== '') return item[field];
+  }
+  const arrayFields = ['answers', 'answerValues', 'values', 'selectedAnswers'];
+  for (const field of arrayFields) {
+    if (!Array.isArray(item[field])) continue;
+    const values = item[field].map(answer => {
+      if (answer === null || answer === undefined) return '';
+      if (typeof answer !== 'object') return String(answer);
+      return answer.answerText || answer.text || answer.value || answer.code || answer.optionText || answer.option || '';
+    }).filter(Boolean);
+    if (values.length) return values.join('; ');
+  }
+  return '';
 }
 function appendRawObjectForTest_(sheetName, obj) {
   const sh = SpreadsheetApp.getActive().getSheetByName(sheetName);
@@ -491,15 +525,22 @@ function appendRawObjectForTest_(sheetName, obj) {
 }
 function normalizeObjectKeys_(obj) {
   const out = {};
-  Object.entries(obj || {}).forEach(([key, value]) => out[normalizeHeaderKey_(key)] = value);
+  Object.entries(obj || {}).forEach(([key, value]) => {
+    if (isQuestionProStructuralKey_(key)) return;
+    out[normalizeHeaderKey_(key)] = value;
+  });
   return out;
+}
+function isQuestionProStructuralKey_(key) {
+  return /^responseSet\.\d+\.(questionText|questionDescription|questionCode|questionID)$/i.test(String(key || ''));
 }
 function valueForHeader_(header, obj, normalizedObj) {
   if (!header) return '';
   if (obj[header] !== undefined) return obj[header];
   const normalizedHeader = normalizeHeaderKey_(header);
   if (normalizedObj[normalizedHeader] !== undefined) return normalizedObj[normalizedHeader];
-  const partialKey = Object.keys(normalizedObj).find(key => key.includes(normalizedHeader) || normalizedHeader.includes(key));
+  if (normalizedHeader.length < 8) return '';
+  const partialKey = Object.keys(normalizedObj).find(key => key.length >= 8 && (key.includes(normalizedHeader) || normalizedHeader.includes(key)));
   return partialKey ? normalizedObj[partialKey] : '';
 }
 function ensureRawFallbackValues_(headers, row, obj) {
