@@ -68,6 +68,8 @@ function getTrackerSummary() {
     readyForDarts: countWhere_(ss, SHEETS.MASTER, 'Ready for DARTS', 'Yes'),
     generatedAt: new Date().toISOString(),
     webAppUrl: getWebAppUrl_(),
+    prescreeningWebhookUrl: buildWebhookUrl_('prescreening'),
+    consentWebhookUrl: buildWebhookUrl_('consent'),
     setup: getSheetSetupStatus_()
   };
 }
@@ -111,6 +113,11 @@ function getWebAppUrl_() {
   }
 }
 
+function buildWebhookUrl_(formType) {
+  const url = getWebAppUrl_();
+  return url ? `${url}?form=${encodeURIComponent(formType)}` : '';
+}
+
 /** Serves the deployed web app URL. This prevents "Script function not found: doGet". */
 function doGet(e) {
   return HtmlService.createHtmlOutputFromFile('Sidebar')
@@ -122,10 +129,10 @@ function doGet(e) {
 function doPost(e) {
   try {
     const payload = parseWebhookPayload_(e);
-    const formType = detectFormType_(payload);
+    const formType = getRequestedFormType_(e, payload) || detectFormType_(payload);
     appendRawPayload_(formType, payload);
     refreshEnrollmentTracker();
-    return jsonResponse_({ok: true, formType});
+    return jsonResponse_({ok: true, formType, message: `Webhook captured in ${formType} raw tab`});
   } catch (err) {
     console.error(err.stack || err);
     return jsonResponse_({ok: false, error: String(err)});
@@ -439,21 +446,81 @@ function detectFormType_(payload) {
   if (text.includes('consent') || text.includes("child's first name") || text.includes('parental/guardian consent')) return 'Consent';
   return 'Prescreening';
 }
-function parseWebhookPayload_(e) { return e && e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {}; }
-function appendRawPayload_(formType, payload) { appendRawObjectForTest_(formType === 'Consent' ? SHEETS.CONSENT_RAW : SHEETS.PRESCREEN_RAW, flattenPayload_(payload)); }
+function parseWebhookPayload_(e) {
+  if (!e) return {};
+  const payload = {};
+  Object.assign(payload, e.parameter || {});
+  const contents = e.postData && e.postData.contents ? String(e.postData.contents).trim() : '';
+  if (!contents) return payload;
+  try {
+    const parsed = JSON.parse(contents);
+    return Object.assign(payload, parsed);
+  } catch (err) {
+    // QuestionPro may send form-encoded bodies instead of raw JSON.
+    if (contents.includes('=')) Object.assign(payload, parseFormEncoded_(contents));
+    else payload.rawBody = contents;
+    return payload;
+  }
+}
+function getRequestedFormType_(e, payload) {
+  const requested = String((e && e.parameter && (e.parameter.form || e.parameter.formType || e.parameter.surveyType)) || payload.form || payload.formType || payload.surveyType || '').toLowerCase();
+  if (/consent/.test(requested)) return 'Consent';
+  if (/pre|screen|interest/.test(requested)) return 'Prescreening';
+  return '';
+}
+function parseFormEncoded_(contents) {
+  return contents.split('&').reduce((obj, pair) => {
+    const [rawKey, rawValue = ''] = pair.split('=');
+    const key = decodeURIComponent(rawKey.replace(/\+/g, ' '));
+    obj[key] = decodeURIComponent(rawValue.replace(/\+/g, ' '));
+    return obj;
+  }, {});
+}
+function appendRawPayload_(formType, payload) {
+  const flattened = flattenPayload_(payload);
+  flattened._rawPayload = JSON.stringify(payload);
+  appendRawObjectForTest_(formType === 'Consent' ? SHEETS.CONSENT_RAW : SHEETS.PRESCREEN_RAW, flattened);
+}
 function appendRawObjectForTest_(sheetName, obj) {
   const sh = SpreadsheetApp.getActive().getSheetByName(sheetName);
   const headers = sh.getRange(RAW_HEADER_ROW, 1, 1, sh.getLastColumn()).getValues()[0];
-  sh.appendRow(headers.map(h => obj[h] || ''));
+  const normalizedObj = normalizeObjectKeys_(obj);
+  const row = headers.map(h => valueForHeader_(h, obj, normalizedObj));
+  ensureRawFallbackValues_(headers, row, obj);
+  sh.appendRow(row);
+}
+function normalizeObjectKeys_(obj) {
+  const out = {};
+  Object.entries(obj || {}).forEach(([key, value]) => out[normalizeHeaderKey_(key)] = value);
+  return out;
+}
+function valueForHeader_(header, obj, normalizedObj) {
+  if (!header) return '';
+  if (obj[header] !== undefined) return obj[header];
+  const normalizedHeader = normalizeHeaderKey_(header);
+  if (normalizedObj[normalizedHeader] !== undefined) return normalizedObj[normalizedHeader];
+  const partialKey = Object.keys(normalizedObj).find(key => key.includes(normalizedHeader) || normalizedHeader.includes(key));
+  return partialKey ? normalizedObj[partialKey] : '';
+}
+function ensureRawFallbackValues_(headers, row, obj) {
+  setRawFallback_(headers, row, ['Response ID', 'ResponseID', 'responseId'], obj['Response ID'] || obj.responseId || obj.id || `WEBHOOK-${Date.now()}`);
+  setRawFallback_(headers, row, ['Response Status'], obj['Response Status'] || obj.status || 'Completed');
+  setRawFallback_(headers, row, ['Timestamp (mm/dd/yyyy)', 'Timestamp'], obj['Timestamp (mm/dd/yyyy)'] || obj.timestamp || new Date());
+  setRawFallback_(headers, row, ['Custom Variable 5', 'External Reference'], obj._rawPayload || JSON.stringify(obj || {}));
+}
+function setRawFallback_(headers, row, possibleHeaders, value) {
+  const index = headers.findIndex(h => possibleHeaders.some(name => normalizeHeaderKey_(h) === normalizeHeaderKey_(name)));
+  if (index >= 0 && !row[index]) row[index] = value;
 }
 function flattenPayload_(payload, prefix = '', out = {}) {
   Object.entries(payload || {}).forEach(([k, v]) => {
     const key = prefix ? `${prefix}.${k}` : k;
     if (v && typeof v === 'object' && !Array.isArray(v)) flattenPayload_(v, key, out);
-    else out[k] = Array.isArray(v) ? v.join('; ') : v;
+    else out[key] = Array.isArray(v) ? v.join('; ') : v;
   });
   return out;
 }
+function normalizeHeaderKey_(value) { return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
 function enrollmentIdFor_(p) { return `ENR-${matchKey_(p) || normalizeToken_(p['ResponseID'])}`.toUpperCase(); }
 function matchKey_(r) { return [normalizeToken_(r['Child Full Name']), normalizeEmail_(r['Parent Email']) || normalizePhone_(r['Parent Phone'])].filter(Boolean).join('|'); }
 function findBestConsent_(p, consents) { return consents.find(c => normalizeToken_(c['Child Full Name']) === normalizeToken_(p['Child Full Name'])) || null; }
