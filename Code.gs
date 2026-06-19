@@ -501,19 +501,30 @@ function extractQuestionProResponseSet_(payload) {
 function extractQuestionProAnswer_(item) {
   const directFields = ['answerText', 'answer', 'responseText', 'response', 'value', 'selectedAnswer', 'displayText'];
   for (const field of directFields) {
-    if (item[field] !== undefined && item[field] !== null && String(item[field]).trim() !== '') return item[field];
+    const value = normalizeCellValue_(item[field]);
+    if (value !== '') return value;
   }
   const arrayFields = ['answers', 'answerValues', 'values', 'selectedAnswers'];
   for (const field of arrayFields) {
     if (!Array.isArray(item[field])) continue;
-    const values = item[field].map(answer => {
-      if (answer === null || answer === undefined) return '';
-      if (typeof answer !== 'object') return String(answer);
-      return answer.answerText || answer.text || answer.value || answer.code || answer.optionText || answer.option || '';
-    }).filter(Boolean);
+    const values = item[field].map(normalizeCellValue_).filter(Boolean);
     if (values.length) return values.join('; ');
   }
   return '';
+}
+function normalizeCellValue_(value) {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return value;
+  if (Array.isArray(value)) return value.map(normalizeCellValue_).filter(Boolean).join('; ');
+  if (typeof value !== 'object') return String(value).trim();
+  const answerFields = ['answerText', 'text', 'value', 'label', 'displayText', 'optionText', 'option', 'code', 'name', 'email', 'phone'];
+  for (const field of answerFields) {
+    if (value[field] === value) continue;
+    const normalized = normalizeCellValue_(value[field]);
+    if (normalized !== '') return normalized;
+  }
+  const primitiveValues = Object.values(value).map(normalizeCellValue_).filter(Boolean);
+  return primitiveValues.length === 1 ? primitiveValues[0] : '';
 }
 function appendRawObjectForTest_(sheetName, obj) {
   const sh = SpreadsheetApp.getActive().getSheetByName(sheetName);
@@ -536,12 +547,12 @@ function isQuestionProStructuralKey_(key) {
 }
 function valueForHeader_(header, obj, normalizedObj) {
   if (!header) return '';
-  if (obj[header] !== undefined) return obj[header];
+  if (obj[header] !== undefined) return normalizeCellValue_(obj[header]);
   const normalizedHeader = normalizeHeaderKey_(header);
-  if (normalizedObj[normalizedHeader] !== undefined) return normalizedObj[normalizedHeader];
+  if (normalizedObj[normalizedHeader] !== undefined) return normalizeCellValue_(normalizedObj[normalizedHeader]);
   if (normalizedHeader.length < 8) return '';
   const partialKey = Object.keys(normalizedObj).find(key => key.length >= 8 && (key.includes(normalizedHeader) || normalizedHeader.includes(key)));
-  return partialKey ? normalizedObj[partialKey] : '';
+  return partialKey ? normalizeCellValue_(normalizedObj[partialKey]) : '';
 }
 function ensureRawFallbackValues_(headers, row, obj) {
   setRawFallback_(headers, row, ['Response ID', 'ResponseID', 'responseId'], obj['Response ID'] || obj.responseId || obj.id || `WEBHOOK-${Date.now()}`);
