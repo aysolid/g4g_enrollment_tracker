@@ -104,11 +104,16 @@
         }
       }, 15000);
       const runner = google.script.run.withSuccessHandler(data => {
-        dashboard = data || {participants:[], followups:[], ready:[], needsReview:[], summary:{}};
+        if (!data || !data.generatedAt) {
+          document.getElementById('status').textContent = 'Dashboard returned no data. Check Apps Script deployment/version and spreadsheet access.';
+          dashboard = {participants:[], followups:[], ready:[], needsReview:[], summary:{}};
+        } else {
+          dashboard = data;
+          document.getElementById('status').textContent = 'Last updated: ' + new Date(dashboard.generatedAt).toLocaleString();
+        }
         hydrateFilters();
         renderCards();
         renderCurrentView();
-        document.getElementById('status').textContent = 'Last updated: ' + new Date(dashboard.generatedAt).toLocaleString();
       }).withFailureHandler(err => {
         document.getElementById('status').textContent = 'Dashboard error: ' + (err && err.message ? err.message : String(err));
       });

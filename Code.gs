@@ -35,6 +35,18 @@ const FOLLOWUP_REVIEW_FIELDS = [
   'Updated Support Details', 'Follow-Up Outcome', 'Eligibility Review Status',
   'Reviewed By', 'Review Date', 'PI Notes'
 ];
+
+function getSpreadsheet_() {
+  const active = SpreadsheetApp.getActiveSpreadsheet();
+  if (active) {
+    PropertiesService.getScriptProperties().setProperty('SPREADSHEET_ID', active.getId());
+    return active;
+  }
+  const storedId = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  if (storedId) return SpreadsheetApp.openById(storedId);
+  throw new Error('No spreadsheet is available. Open the Google Sheet once, reload Apps Script, then try the dashboard again.');
+}
+
 const DEFAULTS = Object.freeze({
   followUpStatus: 'Not Started',
   consentStatus: 'Pending',
@@ -72,7 +84,7 @@ function showProfessorDashboard() {
 
 /** Returns sidebar-friendly dashboard state after a refresh or on page load. */
 function getTrackerSummary() {
-  const ss = SpreadsheetApp.getActive();
+  const ss = getSpreadsheet_();
   return {
     spreadsheetName: ss.getName(),
     prescreening: countRows_(ss, SHEETS.PRESCREEN_CLEAN),
@@ -98,7 +110,7 @@ function refreshFromSidebar() {
 
 
 function getSheetSetupStatus_() {
-  const ss = SpreadsheetApp.getActive();
+  const ss = getSpreadsheet_();
   const missingSheets = Object.values(SHEETS).filter(name => !ss.getSheetByName(name));
   const requiredRawHeaders = {
     [SHEETS.PRESCREEN_RAW]: ['Response ID', 'Timestamp (mm/dd/yyyy)'],
@@ -158,7 +170,7 @@ function doPost(e) {
 
 /** Main Phase 1 processing entry point. Safe to rerun; it updates by response/enrollment IDs. */
 function refreshEnrollmentTracker() {
-  const ss = SpreadsheetApp.getActive();
+  const ss = getSpreadsheet_();
   const config = getConfig_(ss);
   ensureFollowupReviewColumns_(ss);
 
@@ -194,7 +206,7 @@ function refreshProfessorDashboardData() {
 
 function buildProfessorDashboardData_(shouldRefresh) {
   if (shouldRefresh) refreshEnrollmentTracker();
-  const ss = SpreadsheetApp.getActive();
+  const ss = getSpreadsheet_();
   const master = readObjects_(ss.getSheetByName(SHEETS.MASTER), CLEAN_HEADER_ROW, DATA_START_ROW);
   const followups = readObjects_(ss.getSheetByName(SHEETS.FOLLOWUP), CLEAN_HEADER_ROW, DATA_START_ROW);
   const prescreens = readObjects_(ss.getSheetByName(SHEETS.PRESCREEN_CLEAN), CLEAN_HEADER_ROW, DATA_START_ROW);
@@ -296,7 +308,7 @@ function deriveReviewStatus_(masterRow, followup, prescreen) {
 }
 
 function updateFollowupReview(updates) {
-  const ss = SpreadsheetApp.getActive();
+  const ss = getSpreadsheet_();
   ensureFollowupReviewColumns_(ss);
   const sheet = ss.getSheetByName(SHEETS.FOLLOWUP);
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
@@ -326,7 +338,7 @@ function ensureFollowupReviewColumns_(ss) {
 }
 
 function refreshDashboard() {
-  const ss = SpreadsheetApp.getActive();
+  const ss = getSpreadsheet_();
   const sh = ss.getSheetByName(SHEETS.DASHBOARD);
   const metrics = [
     ['Total Prescreening Submitted', countRows_(ss, SHEETS.PRESCREEN_CLEAN)],
@@ -511,7 +523,7 @@ function buildReadyForDarts_(master, prescreens, consents) {
 }
 
 function runPhaseOneSelfTest() {
-  const ss = SpreadsheetApp.getActive();
+  const ss = getSpreadsheet_();
   ensureRequiredSheets_(ss);
   appendRawObjectForTest_(SHEETS.PRESCREEN_RAW, {
     'Response ID': `TEST-P-${Date.now()}`,
@@ -709,7 +721,7 @@ function normalizeCellValue_(value) {
   return primitiveValues.length === 1 ? primitiveValues[0] : '';
 }
 function appendRawObjectForTest_(sheetName, obj) {
-  const sh = SpreadsheetApp.getActive().getSheetByName(sheetName);
+  const sh = getSpreadsheet_().getSheetByName(sheetName);
   const headers = sh.getRange(RAW_HEADER_ROW, 1, 1, sh.getLastColumn()).getValues()[0];
   const normalizedObj = normalizeObjectKeys_(obj);
   const row = headers.map(h => valueForHeader_(h, obj, normalizedObj));
