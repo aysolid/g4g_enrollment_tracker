@@ -27,7 +27,13 @@ const DATA_START_ROW = 2;
 const RAW_DATA_START_ROW = 3;
 const MANUAL_FOLLOWUP_FIELDS = [
   'Follow Up Status', 'Email Drafted', 'Email Sent Date',
-  'Follow Up Completed Date', 'Assigned To', 'Notes'
+  'Follow Up Completed Date', 'Assigned To', 'Notes',
+  'Updated Support Details', 'Follow-Up Outcome', 'Eligibility Review Status',
+  'Reviewed By', 'Review Date', 'PI Notes'
+];
+const FOLLOWUP_REVIEW_FIELDS = [
+  'Updated Support Details', 'Follow-Up Outcome', 'Eligibility Review Status',
+  'Reviewed By', 'Review Date', 'PI Notes'
 ];
 const DEFAULTS = Object.freeze({
   followUpStatus: 'Not Started',
@@ -39,6 +45,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('G4G Tracker')
     .addItem('Open tracker sidebar', 'showTrackerSidebar')
+    .addItem('Open professor dashboard', 'showProfessorDashboard')
     .addItem('Refresh tracker from raw tabs', 'refreshEnrollmentTracker')
     .addItem('Rebuild dashboard counts', 'refreshDashboard')
     .addSeparator()
@@ -53,6 +60,14 @@ function showTrackerSidebar() {
     .setTitle('G4G Tracker')
     .setWidth(360);
   SpreadsheetApp.getUi().showSidebar(html);
+}
+
+function showProfessorDashboard() {
+  const html = HtmlService.createHtmlOutputFromFile('Dashboard')
+    .setTitle('G4G Professor Dashboard')
+    .setWidth(1200)
+    .setHeight(800);
+  SpreadsheetApp.getUi().showModalDialog(html, 'G4G Professor Dashboard');
 }
 
 /** Returns sidebar-friendly dashboard state after a refresh or on page load. */
@@ -120,8 +135,10 @@ function buildWebhookUrl_(formType) {
 
 /** Serves the deployed web app URL. This prevents "Script function not found: doGet". */
 function doGet(e) {
-  return HtmlService.createHtmlOutputFromFile('Sidebar')
-    .setTitle('G4G Enrollment Tracker')
+  const view = String(e && e.parameter && e.parameter.view || 'dashboard').toLowerCase();
+  const file = view === 'sidebar' ? 'Sidebar' : 'Dashboard';
+  return HtmlService.createHtmlOutputFromFile(file)
+    .setTitle(view === 'sidebar' ? 'G4G Enrollment Tracker' : 'G4G Professor Dashboard')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
@@ -143,6 +160,7 @@ function doPost(e) {
 function refreshEnrollmentTracker() {
   const ss = SpreadsheetApp.getActive();
   const config = getConfig_(ss);
+  ensureFollowupReviewColumns_(ss);
 
   const prescreenRows = readRawRows_(ss.getSheetByName(SHEETS.PRESCREEN_RAW));
   const consentRows = readRawRows_(ss.getSheetByName(SHEETS.CONSENT_RAW));
@@ -163,6 +181,117 @@ function refreshEnrollmentTracker() {
   const ready = buildReadyForDarts_(master, prescreenClean, consentClean);
   writeTable_(ss.getSheetByName(SHEETS.READY), ready, 'EnrollmentID');
   refreshDashboard();
+}
+
+
+function getProfessorDashboardData() {
+  refreshEnrollmentTracker();
+  const ss = SpreadsheetApp.getActive();
+  const master = readObjects_(ss.getSheetByName(SHEETS.MASTER), CLEAN_HEADER_ROW, DATA_START_ROW);
+  const followups = readObjects_(ss.getSheetByName(SHEETS.FOLLOWUP), CLEAN_HEADER_ROW, DATA_START_ROW);
+  const prescreens = readObjects_(ss.getSheetByName(SHEETS.PRESCREEN_CLEAN), CLEAN_HEADER_ROW, DATA_START_ROW);
+  const consents = readObjects_(ss.getSheetByName(SHEETS.CONSENT_CLEAN), CLEAN_HEADER_ROW, DATA_START_ROW);
+  const ready = readObjects_(ss.getSheetByName(SHEETS.READY), CLEAN_HEADER_ROW, DATA_START_ROW);
+  const followupById = new Map(followups.map(row => [String(row['EnrollmentID'] || ''), row]));
+  const prescreenByResponse = new Map(prescreens.map(row => [String(row['ResponseID'] || ''), row]));
+  const consentByResponse = new Map(consents.map(row => [String(row['ResponseID'] || ''), row]));
+  const participants = master.map(row => {
+    const followup = followupById.get(String(row['EnrollmentID'] || '')) || {};
+    const prescreen = prescreenByResponse.get(String(row['Prescreening ResponseID'] || '')) || {};
+    const consent = consentByResponse.get(String(row['Consent ResponseID'] || '')) || {};
+    return {
+      enrollmentId: row['EnrollmentID'] || '',
+      childName: row['Child Full Name'] || '',
+      parentName: row['Parent/Caretaker Name'] || '',
+      parentEmail: row['Parent Email'] || '',
+      parentPhone: row['Parent Phone'] || '',
+      grade: prescreen['Child Grade'] || consent['Grade'] || '',
+      prescreeningStatus: row['Prescreening Status'] || '',
+      consentStatus: row['Consent Status'] || '',
+      neurodivergentResponse: row['Neurodivergent Response'] || '',
+      conditions: followup['Conditions/Diagnoses'] || prescreen['Conditions/Diagnoses'] || '',
+      supportDetails: followup['Updated Support Details'] || followup['Support Details'] || prescreen['Diagnostic/Support Details'] || '',
+      originalSupportDetails: followup['Support Details'] || prescreen['Diagnostic/Support Details'] || '',
+      updatedSupportDetails: followup['Updated Support Details'] || '',
+      physicalSupports: followup['Physical Disability Supports'] || prescreen['Physical Disability Supports'] || '',
+      followUpNeeded: row['Follow Up Needed'] || '',
+      followUpStatus: row['Follow Up Status'] || '',
+      emailDrafted: followup['Email Drafted'] || '',
+      emailSentDate: followup['Email Sent Date'] || '',
+      followUpCompletedDate: followup['Follow Up Completed Date'] || '',
+      assignedTo: followup['Assigned To'] || '',
+      followUpOutcome: followup['Follow-Up Outcome'] || '',
+      eligibilityReviewStatus: followup['Eligibility Review Status'] || deriveReviewStatus_(row, followup, prescreen),
+      reviewedBy: followup['Reviewed By'] || '',
+      reviewDate: followup['Review Date'] || '',
+      piNotes: followup['PI Notes'] || '',
+      notes: followup['Notes'] || row['Notes'] || '',
+      enrollmentStatus: row['Enrollment Status'] || '',
+      readyForDarts: row['Ready for DARTS'] || '',
+      lastUpdated: row['Last Updated'] || ''
+    };
+  });
+  return {
+    generatedAt: new Date().toISOString(),
+    summary: buildProfessorSummary_(participants, prescreens, consents, ready),
+    participants,
+    followups: participants.filter(p => p.followUpNeeded === 'Yes'),
+    ready: participants.filter(p => p.readyForDarts === 'Yes'),
+    needsReview: participants.filter(p => p.eligibilityReviewStatus === 'Needs Review' || p.readyForDarts === 'Review')
+  };
+}
+
+function buildProfessorSummary_(participants, prescreens, consents, ready) {
+  return {
+    prescreened: prescreens.length,
+    consentCompleted: consents.filter(row => row['Consent Status'] === 'Completed').length,
+    masterRecords: participants.length,
+    neurodivergentYes: participants.filter(p => p.neurodivergentResponse === 'Yes').length,
+    neurodivergentNo: participants.filter(p => p.neurodivergentResponse === 'No').length,
+    followUpNeeded: participants.filter(p => p.followUpNeeded === 'Yes').length,
+    followUpCompleted: participants.filter(p => p.followUpStatus === 'Completed').length,
+    readyForDarts: ready.length,
+    needsReview: participants.filter(p => p.eligibilityReviewStatus === 'Needs Review' || p.readyForDarts === 'Review').length
+  };
+}
+
+function deriveReviewStatus_(masterRow, followup, prescreen) {
+  if (followup['Eligibility Review Status']) return followup['Eligibility Review Status'];
+  if (masterRow['Follow Up Needed'] === 'Yes' && masterRow['Follow Up Status'] !== 'Completed') return 'Needs Review';
+  if (masterRow['Consent Status'] === 'Pending') return 'Pending Consent';
+  if (masterRow['Ready for DARTS'] === 'Yes') return 'Ready';
+  if (prescreen['Diagnostic/Support Details'] && masterRow['Neurodivergent Response'] === 'No') return 'Needs Review';
+  return 'Not Reviewed';
+}
+
+function updateFollowupReview(updates) {
+  const ss = SpreadsheetApp.getActive();
+  ensureFollowupReviewColumns_(ss);
+  const sheet = ss.getSheetByName(SHEETS.FOLLOWUP);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const idCol = headers.indexOf('EnrollmentID') + 1;
+  const values = sheet.getDataRange().getValues();
+  const targetRow = values.findIndex((row, index) => index > 0 && String(row[idCol - 1]) === String(updates.enrollmentId)) + 1;
+  if (targetRow < 2) throw new Error(`EnrollmentID not found in Followup_Queue: ${updates.enrollmentId}`);
+  const allowed = ['Follow Up Status', 'Email Drafted', 'Email Sent Date', 'Follow Up Completed Date', 'Assigned To', 'Notes', ...FOLLOWUP_REVIEW_FIELDS];
+  allowed.forEach(field => {
+    if (updates[field] === undefined) return;
+    const col = headers.indexOf(field) + 1;
+    if (col > 0) sheet.getRange(targetRow, col).setValue(updates[field]);
+  });
+  refreshEnrollmentTracker();
+  return getProfessorDashboardData();
+}
+
+function ensureFollowupReviewColumns_(ss) {
+  const sheet = ss.getSheetByName(SHEETS.FOLLOWUP);
+  if (!sheet) return;
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  FOLLOWUP_REVIEW_FIELDS.forEach(field => {
+    if (headers.includes(field)) return;
+    sheet.getRange(1, sheet.getLastColumn() + 1).setValue(field);
+    headers.push(field);
+  });
 }
 
 function refreshDashboard() {
@@ -316,7 +445,13 @@ function buildFollowupQueue_(master, prescreens, manualFollowup, config) {
       'Email Sent Date': manual['Email Sent Date'] || '',
       'Follow Up Completed Date': manual['Follow Up Completed Date'] || '',
       'Assigned To': manual['Assigned To'] || '',
-      'Notes': manual['Notes'] || ''
+      'Notes': manual['Notes'] || '',
+      'Updated Support Details': manual['Updated Support Details'] || '',
+      'Follow-Up Outcome': manual['Follow-Up Outcome'] || '',
+      'Eligibility Review Status': manual['Eligibility Review Status'] || '',
+      'Reviewed By': manual['Reviewed By'] || '',
+      'Review Date': manual['Review Date'] || '',
+      'PI Notes': manual['PI Notes'] || ''
     };
   });
 }
