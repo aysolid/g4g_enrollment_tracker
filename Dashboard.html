@@ -96,16 +96,24 @@
     let timer = null;
 
     function loadDashboard(manual) {
-      document.getElementById('status').textContent = manual ? 'Refreshing…' : 'Loading…';
-      google.script.run.withSuccessHandler(data => {
-        dashboard = data;
+      document.getElementById('status').textContent = manual ? 'Refreshing pipeline…' : 'Loading dashboard…';
+      const requestStarted = Date.now();
+      setTimeout(() => {
+        if (Date.now() - requestStarted >= 14000 && document.getElementById('status').textContent.includes('Loading')) {
+          document.getElementById('status').textContent = 'Still loading. If this remains, open Apps Script Executions for the server error.';
+        }
+      }, 15000);
+      const runner = google.script.run.withSuccessHandler(data => {
+        dashboard = data || {participants:[], followups:[], ready:[], needsReview:[], summary:{}};
         hydrateFilters();
         renderCards();
         renderCurrentView();
-        document.getElementById('status').textContent = 'Last updated: ' + new Date(data.generatedAt).toLocaleString();
+        document.getElementById('status').textContent = 'Last updated: ' + new Date(dashboard.generatedAt).toLocaleString();
       }).withFailureHandler(err => {
-        document.getElementById('status').textContent = err && err.message ? err.message : String(err);
-      }).getProfessorDashboardData();
+        document.getElementById('status').textContent = 'Dashboard error: ' + (err && err.message ? err.message : String(err));
+      });
+      if (manual) runner.refreshProfessorDashboardData();
+      else runner.getProfessorDashboardData();
     }
 
     function hydrateFilters() {

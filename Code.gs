@@ -185,7 +185,15 @@ function refreshEnrollmentTracker() {
 
 
 function getProfessorDashboardData() {
-  refreshEnrollmentTracker();
+  return buildProfessorDashboardData_(false);
+}
+
+function refreshProfessorDashboardData() {
+  return buildProfessorDashboardData_(true);
+}
+
+function buildProfessorDashboardData_(shouldRefresh) {
+  if (shouldRefresh) refreshEnrollmentTracker();
   const ss = SpreadsheetApp.getActive();
   const master = readObjects_(ss.getSheetByName(SHEETS.MASTER), CLEAN_HEADER_ROW, DATA_START_ROW);
   const followups = readObjects_(ss.getSheetByName(SHEETS.FOLLOWUP), CLEAN_HEADER_ROW, DATA_START_ROW);
@@ -195,7 +203,8 @@ function getProfessorDashboardData() {
   const followupById = new Map(followups.map(row => [String(row['EnrollmentID'] || ''), row]));
   const prescreenByResponse = new Map(prescreens.map(row => [String(row['ResponseID'] || ''), row]));
   const consentByResponse = new Map(consents.map(row => [String(row['ResponseID'] || ''), row]));
-  const participants = master.map(row => {
+  const sourceRecords = master.length ? master : prescreens.map(row => masterLikeFromPrescreen_(row));
+  const participants = sourceRecords.map(row => {
     const followup = followupById.get(String(row['EnrollmentID'] || '')) || {};
     const prescreen = prescreenByResponse.get(String(row['Prescreening ResponseID'] || '')) || {};
     const consent = consentByResponse.get(String(row['Consent ResponseID'] || '')) || {};
@@ -238,6 +247,28 @@ function getProfessorDashboardData() {
     followups: participants.filter(p => p.followUpNeeded === 'Yes'),
     ready: participants.filter(p => p.readyForDarts === 'Yes'),
     needsReview: participants.filter(p => p.eligibilityReviewStatus === 'Needs Review' || p.readyForDarts === 'Review')
+  };
+}
+
+
+function masterLikeFromPrescreen_(prescreen) {
+  const followNeeded = prescreen['Follow Up Needed'] || 'No';
+  return {
+    'EnrollmentID': enrollmentIdFor_(prescreen),
+    'Child Full Name': prescreen['Child Full Name'] || '',
+    'Parent/Caretaker Name': prescreen['Parent/Caretaker Name'] || '',
+    'Parent Email': prescreen['Parent Email'] || '',
+    'Parent Phone': prescreen['Parent Phone'] || '',
+    'Prescreening Status': prescreen['Response Status'] || 'Completed',
+    'Consent Status': 'Pending',
+    'Neurodivergent Response': prescreen['Neurodivergent Response'] || '',
+    'Follow Up Needed': followNeeded,
+    'Follow Up Status': followNeeded === 'Yes' ? (prescreen['Follow Up Status'] || 'Not Started') : 'Not Needed',
+    'Enrollment Status': 'In Progress',
+    'Ready for DARTS': 'No',
+    'Prescreening ResponseID': prescreen['ResponseID'] || '',
+    'Consent ResponseID': '',
+    'Last Updated': prescreen['Submitted At'] || ''
   };
 }
 
