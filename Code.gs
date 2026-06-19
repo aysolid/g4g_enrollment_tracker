@@ -387,9 +387,21 @@ function readObjects_(sheet, headerRow, dataStartRow) {
 function writeTable_(sheet, records, keyField) {
   const headers = sheet.getRange(CLEAN_HEADER_ROW, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
   if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).clearContent();
-  if (!records.length) return;
+  if (!records.length) {
+    applyOutputFormatting_(sheet, 0, headers.length);
+    return;
+  }
   const values = records.map(rec => headers.map(h => rec[h] === undefined ? '' : rec[h]));
   sheet.getRange(2, 1, values.length, headers.length).setValues(values);
+  applyOutputFormatting_(sheet, values.length, headers.length);
+}
+
+function applyOutputFormatting_(sheet, dataRows, columns) {
+  if (![SHEETS.PRESCREEN_CLEAN, SHEETS.FOLLOWUP].includes(sheet.getName())) return;
+  const rowsToFormat = Math.max(dataRows, Math.max(0, sheet.getLastRow() - 1), 1);
+  const range = sheet.getRange(2, 1, rowsToFormat, columns);
+  range.setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP).setVerticalAlignment('middle');
+  sheet.setRowHeights(2, rowsToFormat, 24);
 }
 function readManualFollowupState_(sheet) {
   const rows = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW);
@@ -409,10 +421,14 @@ function getByContains_(obj, needles) {
   for (const [k, v] of Object.entries(obj)) if (v && lower.some(n => String(k).toLowerCase().includes(n))) return v;
   return '';
 }
+function isRawPayloadValue_(value) {
+  const text = String(value || '').trim();
+  return text.startsWith('{"form"') || text.startsWith('{"responseID"') || text.includes('"responseSet"');
+}
 function collectOptionValues_(obj, options) {
   const found = [];
   Object.entries(obj).forEach(([k, v]) => {
-    if (!v) return;
+    if (!v || isRawPayloadValue_(v)) return;
     const hit = options.find(o => String(k).toLowerCase().includes(String(o).toLowerCase()) || String(v).toLowerCase().includes(String(o).toLowerCase()));
     if (hit) found.push(String(v) === '1' || String(v).toLowerCase() === 'yes' ? hit : String(v));
   });
