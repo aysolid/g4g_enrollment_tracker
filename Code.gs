@@ -250,11 +250,14 @@ function getAppDashboardData() {
 }
 
 function refreshAppDashboardData() {
-  return buildAppDashboardData_(true);
+  // Web-app reloads must be read-only. The Google Sheet remains the source of truth.
+  return buildAppDashboardData_(false);
 }
 
 function buildAppDashboardData_(shouldRefresh) {
-  if (shouldRefresh) refreshEnrollmentTracker();
+  // Intentionally do not rebuild workbook tabs from the web app.
+  // QuestionPro/webhook processing and manual workbook refreshes update the Sheet database.
+  // The dashboard only reads the current Sheet state so it cannot wipe or reset displayed data.
   const ss = getSpreadsheet_();
   const professor = buildProfessorDashboardData_(false);
   const dashboardRows = readDashboardMetricRows_(ss);

@@ -53,8 +53,7 @@
       <h2 id="pageTitle">Dashboard</h2>
       <input class="search" id="globalSearch" placeholder="Search child, parent, email, notes…" oninput="renderPage()">
       <div class="spacer"></div>
-      <button class="btn soft" onclick="toggleAutoRefresh()" id="autoBtn">Auto-refresh: On</button>
-      <button class="btn primary" onclick="loadData(true)">Refresh Data</button>
+      <button class="btn soft" onclick="loadData()">Reload View</button>
       <span class="status" id="status">Loading…</span>
     </div>
     <main id="content"></main>
@@ -67,17 +66,14 @@
 window.__INITIAL_DASHBOARD_DATA__ = JSON.parse(atob('<?!= initialData ?>'));
 let data = window.__INITIAL_DASHBOARD_DATA__ || emptyData();
 let currentPage = 'dashboard';
-let autoRefresh = true;
-let refreshTimer = null;
 
 function emptyData(){return {generatedAt:'',metrics:{},participants:[],followups:[],needsReview:[],ready:[],matchReview:[],unmatchedConsents:[],prescreens:[],consents:[],dashboardRows:[],activity:[],reports:{actionItems:[]},urls:{},setup:{}};}
-function loadData(refresh){
-  setStatus(refresh ? 'Refreshing workbook pipeline…' : 'Loading workbook data…');
-  const runner = google.script.run.withSuccessHandler(payload => {
+function loadData(){
+  setStatus('Reloading current spreadsheet data…');
+  google.script.run.withSuccessHandler(payload => {
     data = payload || emptyData();
-    hydrateNav(); renderPage(); setStatus('Last updated: ' + formatDate(data.generatedAt)); scheduleAutoRefresh();
-  }).withFailureHandler(err => setStatus('Error: ' + (err && err.message ? err.message : String(err))));
-  if(refresh) runner.refreshAppDashboardData(); else runner.getAppDashboardData();
+    hydrateNav(); renderPage(); setStatus('Last updated: ' + formatDate(data.generatedAt));
+  }).withFailureHandler(err => setStatus('Error: ' + (err && err.message ? err.message : String(err)))).getAppDashboardData();
 }
 function showPage(page){currentPage=page;document.querySelectorAll('.navitem').forEach(b=>b.classList.toggle('active',b.dataset.page===page));document.getElementById('pageTitle').textContent=title(page);renderPage();}
 function title(page){return {dashboard:'Dashboard',activity:'Activity Feed',participants:'All Participants',prescreening:'Prescreening Submissions',consent:'Consent Submissions',ready:'Ready for DARTS',followup:'Follow-Up Queue',matching:'Matching Center',professor:'Professor Review',reports:'Reports',admin:'Admin / Webhooks'}[page]||'Dashboard';}
@@ -115,7 +111,7 @@ function simpleSheet(label,rows,cols){content(`<div class="tablewrap"><table><th
 function renderActivity(){content(`<div class="panel"><h3>Workbook Activity Feed</h3><div class="panel-body timeline">${activityList(data.activity||[])}</div></div>`);}
 function renderReports(){content(`<div class="grid-3"><div class="panel"><h3>Follow-Up Status</h3><div class="panel-body">${chartList(data.reports&&data.reports.followupStatus)}</div></div><div class="panel"><h3>Consent Status</h3><div class="panel-body">${chartList(data.reports&&data.reports.consentStatus)}</div></div><div class="panel"><h3>Match Status</h3><div class="panel-body">${chartList(data.reports&&data.reports.matchStatus)}</div></div></div><div class="panel" style="margin-top:18px"><h3>Spreadsheet Dashboard Metrics</h3><div class="panel-body">${metricRows()}</div></div>`);}
 function metricRows(){return `<div class="tablewrap"><table><thead><tr><th>Metric</th><th>Value</th><th>Interpretation</th></tr></thead><tbody>${(data.dashboardRows||[]).map(r=>`<tr><td>${esc(r.metric)}</td><td><strong>${esc(r.value)}</strong></td><td>${esc(r.interpretation)}</td></tr>`).join('')||rowEmpty(3,'dashboard metrics')}</tbody></table></div>`;}
-function renderAdmin(){content(`<div class="grid-2"><div class="panel"><h3>Webhook URLs</h3><div class="panel-body"><div class="field"><label>Prescreening webhook</label><input readonly value="${attr(data.urls&&data.urls.prescreeningWebhook)}"></div><div class="field"><label>Consent webhook</label><input readonly value="${attr(data.urls&&data.urls.consentWebhook)}"></div><button class="btn primary" onclick="loadData(true)">Rebuild workbook from raw tabs</button></div></div><div class="panel"><h3>Setup Status</h3><div class="panel-body"><pre>${esc(JSON.stringify(data.setup||{},null,2))}</pre></div></div></div>`);}
+function renderAdmin(){content(`<div class="grid-2"><div class="panel"><h3>Webhook URLs</h3><div class="panel-body"><div class="field"><label>Prescreening webhook</label><input readonly value="${attr(data.urls&&data.urls.prescreeningWebhook)}"></div><div class="field"><label>Consent webhook</label><input readonly value="${attr(data.urls&&data.urls.consentWebhook)}"></div><p class="status">This web app is read-only for workbook rebuilding. To rebuild processed tabs from raw QuestionPro rows, open the Google Sheet and use <strong>G4G Tracker → Refresh tracker from raw tabs</strong>.</p></div></div><div class="panel"><h3>Setup Status</h3><div class="panel-body"><pre>${esc(JSON.stringify(data.setup||{},null,2))}</pre></div></div></div>`);}
 
 function openParticipant(id){const p=(data.participants||[]).find(x=>x.enrollmentId===id);if(!p)return;modal(p.childName||'Participant',`<div class="formgrid">${info('Enrollment ID',p.enrollmentId)}${info('Parent',p.parentName)}${info('Email',p.parentEmail)}${info('Phone',p.parentPhone)}${info('Neurodivergent',p.neurodivergentResponse)}${info('Conditions',p.conditions)}${info('Follow-Up',p.followUpStatus)}${info('Consent',p.consentStatus)}${info('Match',`${p.matchStatus||''} ${p.matchConfidenceScore||0}%`)}${info('Ready',p.readyForDarts)}</div><div class="field"><label>Original Support Details</label><textarea readonly>${esc(p.originalSupportDetails)}</textarea></div><div class="formgrid"><div class="field"><label>Follow Up Status</label><select id="editFollowStatus">${options(['Not Started','Email Drafted','Email Sent','Awaiting Response','Completed','Not Needed','Unresolved'])}</select></div><div class="field"><label>Eligibility Review Status</label><select id="editReview">${options(['Not Reviewed','Likely Eligible','Needs Follow-Up','Needs Review','Needs PI Review','Not Eligible','Ready'])}</select></div><div class="field"><label>Assigned To</label><input id="editAssigned" value="${attr(p.assignedTo)}"></div><div class="field"><label>Follow-Up Outcome</label><input id="editOutcome" value="${attr(p.followUpOutcome)}"></div></div><div class="field"><label>Updated Support Details</label><textarea id="editUpdated">${esc(p.updatedSupportDetails)}</textarea></div><div class="field"><label>Internal Notes</label><textarea id="editNotes">${esc(p.notes)}</textarea></div><div class="field"><label>PI Notes</label><textarea id="editPiNotes">${esc(p.piNotes)}</textarea></div><button class="btn primary" onclick="saveParticipant('${attr(p.enrollmentId)}')">Save Review</button>`);setValue('editFollowStatus',p.followUpStatus||'Not Started');setValue('editReview',p.eligibilityReviewStatus||'Not Reviewed');}
 function saveParticipant(id){const updates={enrollmentId:id,'Follow Up Status':val('editFollowStatus'),'Assigned To':val('editAssigned'),'Updated Support Details':val('editUpdated'),'Follow-Up Outcome':val('editOutcome'),'Eligibility Review Status':val('editReview'),'Notes':val('editNotes'),'PI Notes':val('editPiNotes')};setStatus('Saving review…');google.script.run.withSuccessHandler(payload=>{data=payload;closeModal();hydrateNav();renderPage();setStatus('Saved: '+formatDate(new Date()));}).withFailureHandler(e=>setStatus('Save error: '+(e.message||e))).updateFollowupReview(updates);}
@@ -137,9 +133,7 @@ function attr(v){return esc(v).replace(/`/g,'&#96;');}
 function val(id){return document.getElementById(id)?.value||'';} function setValue(id,v){const el=document.getElementById(id);if(el)el.value=v||'';}
 function formatDate(v){if(!v)return 'Not available';const d=new Date(v);return isNaN(d)?String(v):d.toLocaleString();}
 function setStatus(t){document.getElementById('status').textContent=t;}
-function toggleAutoRefresh(){autoRefresh=!autoRefresh;document.getElementById('autoBtn').textContent='Auto-refresh: '+(autoRefresh?'On':'Off');scheduleAutoRefresh();}
-function scheduleAutoRefresh(){clearTimeout(refreshTimer);if(autoRefresh)refreshTimer=setTimeout(()=>loadData(false),60000);}
-if(data&&data.generatedAt){hydrateNav();renderPage();setStatus('Last updated: '+formatDate(data.generatedAt));scheduleAutoRefresh();}else{loadData(false);}
+if(data&&data.generatedAt){hydrateNav();renderPage();setStatus('Last updated: '+formatDate(data.generatedAt));}else{loadData();}
 </script>
 </body>
 </html>
