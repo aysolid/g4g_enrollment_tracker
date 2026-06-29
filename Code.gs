@@ -254,7 +254,7 @@ function buildProfessorDashboardData_(shouldRefresh) {
   });
   return {
     generatedAt: new Date().toISOString(),
-    summary: buildProfessorSummary_(participants, prescreens, consents, ready),
+    summary: buildProfessorSummary_(participants, prescreens, consents, ready, ss),
     participants,
     followups: participants.filter(p => p.followUpNeeded === 'Yes'),
     ready: participants.filter(p => p.readyForDarts === 'Yes'),
@@ -284,9 +284,10 @@ function masterLikeFromPrescreen_(prescreen) {
   };
 }
 
-function buildProfessorSummary_(participants, prescreens, consents, ready) {
-  return {
+function buildProfessorSummary_(participants, prescreens, consents, ready, ss) {
+  const computed = {
     prescreened: prescreens.length,
+    consentSubmitted: consents.length,
     consentCompleted: consents.filter(row => row['Consent Status'] === 'Completed').length,
     masterRecords: participants.length,
     neurodivergentYes: participants.filter(p => p.neurodivergentResponse === 'Yes').length,
@@ -296,6 +297,26 @@ function buildProfessorSummary_(participants, prescreens, consents, ready) {
     readyForDarts: ready.length,
     needsReview: participants.filter(p => p.eligibilityReviewStatus === 'Needs Review' || p.readyForDarts === 'Review').length
   };
+  return Object.assign(computed, readDashboardMetrics_(ss));
+}
+function readDashboardMetrics_(ss) {
+  const sheet = ss.getSheetByName(SHEETS.DASHBOARD);
+  if (!sheet) return {};
+  const rows = sheet.getDataRange().getValues();
+  const metrics = {};
+  rows.forEach(row => {
+    const name = String(row[0] || '').trim();
+    const value = Number(row[1] || 0);
+    if (name === 'Total Prescreening Submitted') metrics.prescreened = value;
+    if (name === 'Total Consent Submitted') metrics.consentSubmitted = value;
+    if (name === 'Total Master Enrollment Records') metrics.masterRecords = value;
+    if (name === 'Follow Up Needed') metrics.followUpNeeded = value;
+    if (name === 'Follow Up Completed') metrics.followUpCompleted = value;
+    if (name === 'Consent Completed') metrics.consentCompleted = value;
+    if (name === 'Ready for DARTS') metrics.readyForDarts = value;
+    if (name === 'Needs Review') metrics.needsReview = value;
+  });
+  return metrics;
 }
 
 function deriveReviewStatus_(masterRow, followup, prescreen) {
@@ -551,7 +572,23 @@ function getConfig_(ss) {
     defaultEnrollmentStatus: String(map.get('Default Enrollment Status') || DEFAULTS.enrollmentStatus)
   };
 }
-function readRawRows_(sheet) { return readObjects_(sheet, RAW_HEADER_ROW, RAW_DATA_START_ROW).filter(r => Object.values(r).some(Boolean)); }
+function readRawRows_(sheet) {
+  return readObjects_(sheet, RAW_HEADER_ROW, RAW_DATA_START_ROW).filter(isMeaningfulRawRow_);
+}
+function isMeaningfulRawRow_(row) {
+  const responseId = String(row['Response ID'] || row['ResponseID'] || '').trim();
+  const timestamp = String(row['Timestamp (mm/dd/yyyy)'] || row['Timestamp'] || '').trim();
+  const email = String(row['Respondent Email'] || row['Email Address:'] || row['Email Address'] || '').trim();
+  const payload = String(row['Custom Variable 5'] || row['External Reference'] || '').trim();
+  const namedFields = [responseId, timestamp, email, payload].some(Boolean);
+  if (namedFields) return true;
+  return Object.values(row).some(value => {
+    if (value === null || value === undefined || value === false) return false;
+    const text = String(value).trim();
+    return text !== '' && text !== 'FALSE';
+  });
+}
+
 function readObjects_(sheet, headerRow, dataStartRow) {
   const values = sheet.getDataRange().getValues();
   const subheaders = headerRow + 1 <= values.length ? values[headerRow] : [];
@@ -776,7 +813,7 @@ function cleanName_(v) { return String(v || '').trim().replace(/\s+/g, ' ').repl
 function normalizeEmail_(v) { return String(v || '').trim().toLowerCase(); }
 function normalizePhone_(v) { const d = String(v || '').replace(/\D/g, ''); return d.length === 10 ? `${d.slice(0,3)}-${d.slice(3,6)}-${d.slice(6)}` : String(v || '').trim(); }
 function normalizeToken_(v) { return String(v || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
-function countRows_(ss, name) { return Math.max(0, ss.getSheetByName(name).getLastRow() - 1); }
+function countRows_(ss, name) { return readObjects_(ss.getSheetByName(name), CLEAN_HEADER_ROW, DATA_START_ROW).length; }
 function countWhere_(ss, name, field, expected) { return readObjects_(ss.getSheetByName(name), CLEAN_HEADER_ROW, DATA_START_ROW).filter(r => r[field] === expected).length; }
 function jsonResponse_(obj) { return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON); }
 function ensureRequiredSheets_(ss) { Object.values(SHEETS).forEach(n => { if (!ss.getSheetByName(n)) throw new Error(`Missing required sheet: ${n}`); }); }

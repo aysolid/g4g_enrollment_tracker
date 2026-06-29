@@ -135,8 +135,8 @@
     function renderCards() {
       const s = dashboard.summary || {};
       const cards = [
-        ['Prescreened', s.prescreened || 0], ['Consent Completed', s.consentCompleted || 0], ['Neurodivergent / Support: Yes', s.neurodivergentYes || 0],
-        ['Follow-Up Needed', s.followUpNeeded || 0], ['Follow-Up Completed', s.followUpCompleted || 0], ['Ready for DARTS', s.readyForDarts || 0], ['Needs Review', s.needsReview || 0]
+        ['Prescreened', s.prescreened || 0], ['Consent Submitted', s.consentSubmitted || 0], ['Master Records', s.masterRecords || 0],
+        ['Neurodivergent / Support: Yes', s.neurodivergentYes || 0], ['Follow-Up Needed', s.followUpNeeded || 0], ['Follow-Up Completed', s.followUpCompleted || 0], ['Ready for DARTS', s.readyForDarts || 0], ['Needs Review', s.needsReview || 0]
       ];
       document.getElementById('cards').innerHTML = cards.map(([label,value]) => `<div class="card"><div class="metric-label">${label}</div><div class="metric-value">${value}</div></div>`).join('');
     }
