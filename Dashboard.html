@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { --blue:#0b57d0; --green:#137333; --orange:#b06000; --red:#b3261e; --purple:#6f42c1; --gray:#5f6368; --bg:#f8fafc; --card:#ffffff; --border:#d9e2ec; }
+    body { margin:0; font-family: Inter, Arial, sans-serif; color:#1f2937; background:var(--bg); }
+    header { background:linear-gradient(135deg,#0b57d0,#063b8f); color:white; padding:22px 28px; }
+    header h1 { margin:0; font-size:24px; }
+    header p { margin:6px 0 0; opacity:.9; }
+    .toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:16px 28px; background:white; border-bottom:1px solid var(--border); position:sticky; top:0; z-index:2; }
+    button { border:0; border-radius:8px; padding:10px 14px; font-weight:700; cursor:pointer; }
+    .primary { background:var(--blue); color:white; }
+    .secondary { background:#e8f0fe; color:var(--blue); }
+    input, select, textarea { border:1px solid var(--border); border-radius:8px; padding:9px 10px; font:inherit; }
+    input[type="search"] { min-width:260px; }
+    main { padding:20px 28px 36px; }
+    .cards { display:grid; grid-template-columns:repeat(6,minmax(145px,1fr)); gap:14px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+    .metric-label { color:var(--gray); font-size:12px; text-transform:uppercase; letter-spacing:.05em; }
+    .metric-value { font-size:28px; font-weight:800; margin-top:6px; }
+    .section { margin-top:22px; }
+    .section h2 { font-size:18px; margin:0 0 10px; }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin:18px 0 12px; }
+    .tab { background:white; color:#334155; border:1px solid var(--border); }
+    .tab.active { background:var(--blue); color:white; }
+    table { width:100%; border-collapse:collapse; background:white; border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+    th, td { border-bottom:1px solid #edf2f7; padding:10px; text-align:left; vertical-align:top; font-size:13px; }
+    th { background:#f1f5f9; color:#334155; position:sticky; top:73px; z-index:1; }
+    tr:hover { background:#f8fafc; }
+    .badge { display:inline-block; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:700; white-space:nowrap; }
+    .yes,.completed,.ready { background:#dcfce7; color:var(--green); }
+    .no,.not-needed { background:#f1f5f9; color:#475569; }
+    .pending,.in-progress { background:#dbeafe; color:#1d4ed8; }
+    .needed,.awaiting,.review { background:#ffedd5; color:var(--orange); }
+    .problem { background:#fee2e2; color:var(--red); }
+    .text-preview { max-width:280px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .kanban { display:grid; grid-template-columns:repeat(5,minmax(190px,1fr)); gap:12px; }
+    .lane { background:#eef2f7; border-radius:12px; padding:10px; min-height:120px; }
+    .lane h3 { margin:0 0 8px; font-size:14px; }
+    .person-card { background:white; border:1px solid var(--border); border-left:4px solid var(--orange); border-radius:10px; padding:10px; margin-bottom:8px; }
+    .person-card strong { display:block; }
+    .modal-backdrop { display:none; position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:10; align-items:center; justify-content:center; }
+    .modal { width:min(850px,92vw); max-height:90vh; overflow:auto; background:white; border-radius:16px; padding:20px; box-shadow:0 20px 60px rgba(0,0,0,.25); }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .field { margin-bottom:10px; }
+    .field label { display:block; font-size:12px; color:var(--gray); margin-bottom:4px; font-weight:700; }
+    .field textarea { width:100%; min-height:90px; box-sizing:border-box; }
+    .field input, .field select { width:100%; box-sizing:border-box; }
+    .status { color:var(--gray); margin-left:auto; font-size:13px; }
+    @media (max-width:1100px){ .cards{grid-template-columns:repeat(3,1fr);} .kanban{grid-template-columns:1fr 1fr;} }
+    @media (max-width:700px){ .cards,.grid,.kanban{grid-template-columns:1fr;} th{position:static;} }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>G4G Professor Enrollment Dashboard</h1>
+    <p>Real-time overview of prescreening, consent, follow-up, review, and DARTS readiness.</p>
+  </header>
+  <div class="toolbar">
+    <button class="primary" onclick="loadDashboard(true)">Refresh dashboard</button>
+    <button class="secondary" onclick="setAutoRefresh()" id="autoButton">Auto-refresh: On</button>
+    <input type="search" id="search" placeholder="Search child, parent, email…" oninput="renderCurrentView()">
+    <select id="filterFollow" onchange="renderCurrentView()"><option value="">All follow-up statuses</option></select>
+    <select id="filterConsent" onchange="renderCurrentView()"><option value="">All consent statuses</option></select>
+    <select id="filterReady" onchange="renderCurrentView()"><option value="">All readiness</option><option>Yes</option><option>No</option><option>Review</option></select>
+    <span class="status" id="status">Loading…</span>
+  </div>
+  <main>
+    <div class="cards" id="cards"></div>
+    <div class="tabs">
+      <button class="tab active" data-view="participants" onclick="switchView('participants')">Participants</button>
+      <button class="tab" data-view="followups" onclick="switchView('followups')">Follow-Up Queue</button>
+      <button class="tab" data-view="review" onclick="switchView('review')">Needs Review</button>
+      <button class="tab" data-view="ready" onclick="switchView('ready')">Ready for DARTS</button>
+      <button class="tab" data-view="kanban" onclick="switchView('kanban')">Follow-Up Board</button>
+    </div>
+    <section class="section" id="content"></section>
+  </main>
+
+  <div class="modal-backdrop" id="modalBackdrop">
+    <div class="modal">
+      <div style="display:flex; justify-content:space-between; gap:12px; align-items:center;">
+        <h2 id="modalTitle">Participant</h2>
+        <button class="secondary" onclick="closeModal()">Close</button>
+      </div>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <script>
+    window.__INITIAL_DASHBOARD_DATA__ = JSON.parse(atob('<?!= initialData ?>'));
+    let dashboard = window.__INITIAL_DASHBOARD_DATA__ || {participants:[], followups:[], ready:[], needsReview:[], summary:{}};
+    let currentView = 'participants';
+    let autoRefresh = true;
+    let timer = null;
+
+    function loadDashboard(manual) {
+      document.getElementById('status').textContent = manual ? 'Refreshing pipeline…' : 'Loading dashboard…';
+      const requestStarted = Date.now();
+      setTimeout(() => {
+        if (Date.now() - requestStarted >= 14000 && document.getElementById('status').textContent.includes('Loading')) {
+          document.getElementById('status').textContent = 'Still loading. If this remains, open Apps Script Executions for the server error.';
+        }
+      }, 15000);
+      const runner = google.script.run.withSuccessHandler(data => {
+        if (!data || !data.generatedAt) {
+          document.getElementById('status').textContent = 'Dashboard returned no data. Check Apps Script deployment/version and spreadsheet access.';
+          dashboard = {participants:[], followups:[], ready:[], needsReview:[], summary:{}};
+        } else {
+          dashboard = data;
+          document.getElementById('status').textContent = 'Last updated: ' + new Date(dashboard.generatedAt).toLocaleString();
+        }
+        hydrateFilters();
+        renderCards();
+        renderCurrentView();
+      }).withFailureHandler(err => {
+        document.getElementById('status').textContent = 'Dashboard error: ' + (err && err.message ? err.message : String(err));
+      });
+      if (manual) runner.refreshProfessorDashboardData();
+      else runner.getProfessorDashboardData();
+    }
+
+    function hydrateFilters() {
+      fillSelect('filterFollow', unique(dashboard.participants.map(p => p.followUpStatus).filter(Boolean)), 'All follow-up statuses');
+      fillSelect('filterConsent', unique(dashboard.participants.map(p => p.consentStatus).filter(Boolean)), 'All consent statuses');
+    }
+    function fillSelect(id, values, label) {
+      const select = document.getElementById(id); const selected = select.value;
+      select.innerHTML = '<option value="">' + label + '</option>' + values.map(v => '<option>' + escapeHtml(v) + '</option>').join('');
+      select.value = values.includes(selected) ? selected : '';
+    }
+    function unique(values) { return [...new Set(values)].sort(); }
+
+    function renderCards() {
+      const s = dashboard.summary || {};
+      const cards = [
+        ['Prescreened', s.prescreened || 0], ['Consent Submitted', s.consentSubmitted || 0], ['Master Records', s.masterRecords || 0],
+        ['Neurodivergent / Support: Yes', s.neurodivergentYes || 0], ['Follow-Up Needed', s.followUpNeeded || 0], ['Follow-Up Completed', s.followUpCompleted || 0], ['Ready for DARTS', s.readyForDarts || 0], ['Needs Review', s.needsReview || 0]
+      ];
+      document.getElementById('cards').innerHTML = cards.map(([label,value]) => `<div class="card"><div class="metric-label">${label}</div><div class="metric-value">${value}</div></div>`).join('');
+    }
+
+    function switchView(view) {
+      currentView = view;
+      document.querySelectorAll('.tab').forEach(btn => btn.classList.toggle('active', btn.dataset.view === view));
+      renderCurrentView();
+    }
+
+    function filteredParticipants(source) {
+      const q = document.getElementById('search').value.toLowerCase();
+      const follow = document.getElementById('filterFollow').value;
+      const consent = document.getElementById('filterConsent').value;
+      const ready = document.getElementById('filterReady').value;
+      return source.filter(p => {
+        const hay = [p.childName,p.parentName,p.parentEmail,p.conditions,p.supportDetails,p.eligibilityReviewStatus,p.matchStatus,p.matchReasons].join(' ').toLowerCase();
+        return (!q || hay.includes(q)) && (!follow || p.followUpStatus === follow) && (!consent || p.consentStatus === consent) && (!ready || p.readyForDarts === ready);
+      });
+    }
+
+    function renderCurrentView() {
+      const map = {participants: dashboard.participants, followups: dashboard.followups, review: dashboard.needsReview, ready: dashboard.ready};
+      if (currentView === 'kanban') return renderKanban();
+      renderTable(filteredParticipants(map[currentView] || []));
+    }
+
+    function renderTable(rows) {
+      document.getElementById('content').innerHTML = `<h2>${titleForView()}</h2><table><thead><tr>
+        <th>Child</th><th>Parent</th><th>Neurodivergent</th><th>Follow-Up</th><th>Consent</th><th>Match</th><th>Ready</th><th>Support Details</th><th>Review</th><th></th>
+      </tr></thead><tbody>${rows.map(rowHtml).join('') || '<tr><td colspan="10">No records match the current filters.</td></tr>'}</tbody></table>`;
+    }
+    function rowHtml(p) {
+      return `<tr><td><strong>${escapeHtml(p.childName)}</strong><br><small>${escapeHtml(p.enrollmentId)}</small></td><td>${escapeHtml(p.parentName)}<br><small>${escapeHtml(p.parentEmail)}</small></td><td>${badge(p.neurodivergentResponse)}</td><td>${badge(p.followUpNeeded === 'Yes' ? p.followUpStatus || 'Needed' : 'Not Needed')}</td><td>${badge(p.consentStatus)}</td><td>${badge(p.matchStatus || 'No Consent Yet')}<br><small>${escapeHtml(p.matchConfidenceScore || 0)}%</small></td><td>${badge(p.readyForDarts)}</td><td><div class="text-preview" title="${escapeAttr(p.supportDetails)}">${escapeHtml(p.supportDetails)}</div></td><td>${badge(p.eligibilityReviewStatus)}</td><td><button class="secondary" onclick="openParticipant('${escapeAttr(p.enrollmentId)}')">Details</button></td></tr>`;
+    }
+    function titleForView(){ return {participants:'Participant Enrollment Pipeline', followups:'Follow-Up Queue', review:'Needs Review', ready:'Ready for DARTS'}[currentView] || 'Participants'; }
+
+    function renderKanban() {
+      const statuses = ['Not Started','Email Drafted','Email Sent','Awaiting Response','Completed'];
+      const lanes = statuses.map(status => {
+        const cards = dashboard.followups.filter(p => (p.followUpStatus || 'Not Started') === status).map(p => `<div class="person-card"><strong>${escapeHtml(p.childName)}</strong><small>${escapeHtml(p.parentName)}</small><p class="text-preview">${escapeHtml(p.supportDetails)}</p><button class="secondary" onclick="openParticipant('${escapeAttr(p.enrollmentId)}')">Open</button></div>`).join('') || '<small>No records</small>';
+        return `<div class="lane"><h3>${status}</h3>${cards}</div>`;
+      }).join('');
+      document.getElementById('content').innerHTML = `<h2>Follow-Up Board</h2><div class="kanban">${lanes}</div>`;
+    }
+
+    function openParticipant(id) {
+      const p = dashboard.participants.find(item => item.enrollmentId === id);
+      if (!p) return;
+      document.getElementById('modalTitle').textContent = p.childName || 'Participant';
+      document.getElementById('modalBody').innerHTML = `<div class="grid">
+        ${info('Parent', p.parentName)}${info('Email', p.parentEmail)}${info('Phone', p.parentPhone)}${info('Grade', p.grade)}
+        ${info('Neurodivergent Response', p.neurodivergentResponse)}${info('Conditions/Diagnoses', p.conditions)}
+        ${info('Consent Status', p.consentStatus)}${info('Match Status', (p.matchStatus || '') + (p.matchConfidenceScore ? ' (' + p.matchConfidenceScore + '%)' : ''))}${info('Match Reasons', p.matchReasons)}${info('Ready for DARTS', p.readyForDarts)}
+      </div>
+      <div class="field"><label>Original Support Details</label><textarea readonly>${escapeHtml(p.originalSupportDetails)}</textarea></div>
+      <div class="grid">
+        <div class="field"><label>Follow Up Status</label><select id="editFollowStatus"><option>Not Started</option><option>Email Drafted</option><option>Email Sent</option><option>Awaiting Response</option><option>Completed</option><option>Not Needed</option><option>Unresolved</option></select></div>
+        <div class="field"><label>Eligibility Review Status</label><select id="editReview"><option>Not Reviewed</option><option>Likely Eligible</option><option>Needs Follow-Up</option><option>Needs Review</option><option>Needs PI Review</option><option>Not Eligible</option><option>Ready</option></select></div>
+        <div class="field"><label>Assigned To</label><input id="editAssigned" value="${escapeAttr(p.assignedTo)}"></div>
+        <div class="field"><label>Follow-Up Outcome</label><input id="editOutcome" value="${escapeAttr(p.followUpOutcome)}" placeholder="Parent confirmed / no response / needs review"></div>
+        <div class="field"><label>Reviewed By</label><input id="editReviewedBy" value="${escapeAttr(p.reviewedBy)}"></div>
+        <div class="field"><label>Review Date</label><input id="editReviewDate" value="${escapeAttr(p.reviewDate)}"></div>
+      </div>
+      <div class="field"><label>Updated Support Details</label><textarea id="editUpdated">${escapeHtml(p.updatedSupportDetails)}</textarea></div>
+      <div class="field"><label>Internal Notes</label><textarea id="editNotes">${escapeHtml(p.notes)}</textarea></div>
+      <div class="field"><label>PI Notes</label><textarea id="editPiNotes">${escapeHtml(p.piNotes)}</textarea></div>
+      <button class="primary" onclick="saveParticipant('${escapeAttr(p.enrollmentId)}')">Save follow-up review</button>`;
+      setSelect('editFollowStatus', p.followUpStatus || 'Not Started'); setSelect('editReview', p.eligibilityReviewStatus || 'Not Reviewed');
+      document.getElementById('modalBackdrop').style.display = 'flex';
+    }
+
+    function saveParticipant(id) {
+      const updates = {
+        enrollmentId:id,
+        'Follow Up Status': document.getElementById('editFollowStatus').value,
+        'Assigned To': document.getElementById('editAssigned').value,
+        'Notes': document.getElementById('editNotes').value,
+        'Updated Support Details': document.getElementById('editUpdated').value,
+        'Follow-Up Outcome': document.getElementById('editOutcome').value,
+        'Eligibility Review Status': document.getElementById('editReview').value,
+        'Reviewed By': document.getElementById('editReviewedBy').value,
+        'Review Date': document.getElementById('editReviewDate').value,
+        'PI Notes': document.getElementById('editPiNotes').value
+      };
+      document.getElementById('status').textContent = 'Saving…';
+      google.script.run.withSuccessHandler(data => { dashboard = data; closeModal(); renderCards(); renderCurrentView(); document.getElementById('status').textContent = 'Saved: ' + new Date().toLocaleString(); }).withFailureHandler(err => document.getElementById('status').textContent = err.message || String(err)).updateFollowupReview(updates);
+    }
+
+    function closeModal(){ document.getElementById('modalBackdrop').style.display = 'none'; }
+    function info(label, value){ return `<div class="field"><label>${label}</label><div>${escapeHtml(value || '')}</div></div>`; }
+    function badge(value){ const v = value || 'Missing'; const cls = /yes|completed|ready/i.test(v) ? 'yes' : /no|not needed/i.test(v) ? 'no' : /review|needed|awaiting|unresolved/i.test(v) ? 'needed' : /pending|progress|drafted|sent/i.test(v) ? 'pending' : 'problem'; return `<span class="badge ${cls}">${escapeHtml(v)}</span>`; }
+    function setSelect(id, value){ const el=document.getElementById(id); if([...el.options].some(o=>o.value===value)) el.value=value; }
+    function setAutoRefresh(){ autoRefresh=!autoRefresh; document.getElementById('autoButton').textContent='Auto-refresh: '+(autoRefresh?'On':'Off'); if(autoRefresh) scheduleRefresh(); else clearTimeout(timer); }
+    function scheduleRefresh(){ clearTimeout(timer); if(autoRefresh) timer=setTimeout(()=>{ loadDashboard(false); scheduleRefresh(); }, 60000); }
+    function escapeHtml(value){ return String(value || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+    function escapeAttr(value){ return escapeHtml(value).replace(/'/g, '&#39;'); }
+    if (dashboard && dashboard.generatedAt) {
+      hydrateFilters();
+      renderCards();
+      renderCurrentView();
+      document.getElementById('status').textContent = dashboard.error ? ('Dashboard error: ' + dashboard.error) : ('Last updated: ' + new Date(dashboard.generatedAt).toLocaleString());
+    } else {
+      loadDashboard(false);
+    }
+    scheduleRefresh();
+  </script>
+</body>
+</html>
