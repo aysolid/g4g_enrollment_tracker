@@ -35,6 +35,23 @@ const FOLLOWUP_REVIEW_FIELDS = [
   'Updated Support Details', 'Follow-Up Outcome', 'Eligibility Review Status',
   'Reviewed By', 'Review Date', 'PI Notes'
 ];
+const MATCH_REVIEW_SHEET = 'Match_Review';
+const UNMATCHED_CONSENT_SHEET = 'Unmatched_Consent';
+const MASTER_MATCH_FIELDS = [
+  'Match Status', 'Match Confidence Score', 'Match Reasons', 'Needs Match Review',
+  'Possible Consent Matches', 'Manual Consent ResponseID', 'Manual Match Notes'
+];
+const MATCH_REVIEW_HEADERS = [
+  'EnrollmentID', 'Prescreening ResponseID', 'Child Full Name', 'Parent/Caretaker Name',
+  'Parent Email', 'Parent Phone', 'Match Status', 'Match Confidence Score',
+  'Match Reasons', 'Possible Consent Matches', 'Manual Consent ResponseID',
+  'Manual Match Notes', 'Last Updated'
+];
+const UNMATCHED_CONSENT_HEADERS = [
+  'Consent ResponseID', 'Submitted At', 'Child Full Name', 'Parent Full Name',
+  'Parent Email', 'Parent Phone', 'Consent Status', 'Best Prescreening Match',
+  'Best Match Score', 'Match Reasons', 'Review Status', 'Notes'
+];
 
 function getSpreadsheet_() {
   const active = SpreadsheetApp.getActiveSpreadsheet();
@@ -188,6 +205,8 @@ function refreshEnrollmentTracker() {
   const ss = getSpreadsheet_();
   const config = getConfig_(ss);
   ensureFollowupReviewColumns_(ss);
+  ensureMasterMatchColumns_(ss);
+  ensureAuxiliaryMatchSheets_(ss);
 
   const prescreenRows = readRawRows_(ss.getSheetByName(SHEETS.PRESCREEN_RAW));
   const consentRows = readRawRows_(ss.getSheetByName(SHEETS.CONSENT_RAW));
@@ -199,8 +218,15 @@ function refreshEnrollmentTracker() {
   writeTable_(ss.getSheetByName(SHEETS.CONSENT_CLEAN), consentClean, 'ResponseID');
 
   const manualFollowupByEnrollment = readManualFollowupState_(ss.getSheetByName(SHEETS.FOLLOWUP));
-  const master = buildMasterEnrollment_(prescreenClean, consentClean, manualFollowupByEnrollment, config);
+  const manualMatchByEnrollment = readManualMatchState_(ss.getSheetByName(SHEETS.MASTER));
+  const master = buildMasterEnrollment_(prescreenClean, consentClean, manualFollowupByEnrollment, config, manualMatchByEnrollment);
   writeTable_(ss.getSheetByName(SHEETS.MASTER), master, 'EnrollmentID');
+
+  const matchReview = buildMatchReview_(master);
+  writeTable_(ss.getSheetByName(MATCH_REVIEW_SHEET), matchReview, 'EnrollmentID');
+
+  const unmatchedConsent = buildUnmatchedConsent_(prescreenClean, consentClean, master);
+  writeTable_(ss.getSheetByName(UNMATCHED_CONSENT_SHEET), unmatchedConsent, 'Consent ResponseID');
 
   const followupQueue = buildFollowupQueue_(master, prescreenClean, manualFollowupByEnrollment, config);
   writeTable_(ss.getSheetByName(SHEETS.FOLLOWUP), followupQueue, 'EnrollmentID');
@@ -258,6 +284,11 @@ function buildProfessorDashboardData_(shouldRefresh) {
       assignedTo: followup['Assigned To'] || '',
       followUpOutcome: followup['Follow-Up Outcome'] || '',
       eligibilityReviewStatus: followup['Eligibility Review Status'] || deriveReviewStatus_(row, followup, prescreen),
+      matchStatus: row['Match Status'] || '',
+      matchConfidenceScore: row['Match Confidence Score'] || '',
+      matchReasons: row['Match Reasons'] || '',
+      needsMatchReview: row['Needs Match Review'] || '',
+      possibleConsentMatches: row['Possible Consent Matches'] || '',
       reviewedBy: followup['Reviewed By'] || '',
       reviewDate: followup['Review Date'] || '',
       piNotes: followup['PI Notes'] || '',
@@ -295,6 +326,13 @@ function masterLikeFromPrescreen_(prescreen) {
     'Ready for DARTS': 'No',
     'Prescreening ResponseID': prescreen['ResponseID'] || '',
     'Consent ResponseID': '',
+    'Match Status': 'No Consent Yet',
+    'Match Confidence Score': 0,
+    'Match Reasons': '',
+    'Needs Match Review': 'No',
+    'Possible Consent Matches': '',
+    'Manual Consent ResponseID': '',
+    'Manual Match Notes': '',
     'Last Updated': prescreen['Submitted At'] || ''
   };
 }
@@ -336,6 +374,7 @@ function readDashboardMetrics_(ss) {
 
 function deriveReviewStatus_(masterRow, followup, prescreen) {
   if (followup['Eligibility Review Status']) return followup['Eligibility Review Status'];
+  if (masterRow['Needs Match Review'] === 'Yes') return 'Needs Review';
   if (masterRow['Follow Up Needed'] === 'Yes' && masterRow['Follow Up Status'] !== 'Completed') return 'Needs Review';
   if (masterRow['Consent Status'] === 'Pending') return 'Pending Consent';
   if (masterRow['Ready for DARTS'] === 'Yes') return 'Ready';
@@ -383,7 +422,10 @@ function refreshDashboard() {
     ['Follow Up Needed', countWhere_(ss, SHEETS.MASTER, 'Follow Up Needed', 'Yes')],
     ['Follow Up Sent', countWhere_(ss, SHEETS.FOLLOWUP, 'Follow Up Status', 'Email Sent')],
     ['Follow Up Completed', countWhere_(ss, SHEETS.FOLLOWUP, 'Follow Up Status', 'Completed')],
+    ['Consent Completed', countWhere_(ss, SHEETS.MASTER, 'Consent Status', 'Completed')],
     ['Ready for DARTS', countWhere_(ss, SHEETS.MASTER, 'Ready for DARTS', 'Yes')],
+    ['Unmatched Consent Records', countRows_(ss, UNMATCHED_CONSENT_SHEET)],
+    ['Possible Duplicate Records', countWhere_(ss, MATCH_REVIEW_SHEET, 'Review Status', 'Needs Review')],
     ['Needs Review', countWhere_(ss, SHEETS.MASTER, 'Ready for DARTS', 'Review')]
   ];
   const headerRow = 2;
@@ -473,15 +515,17 @@ function normalizeConsent_(raw, index, config) {
   };
 }
 
-function buildMasterEnrollment_(prescreens, consents, manualFollowup, config) {
-  const consentByKey = new Map(consents.map(c => [matchKey_(c), c]).filter(([k]) => k));
+function buildMasterEnrollment_(prescreens, consents, manualFollowup, config, manualMatchByEnrollment) {
   return prescreens.map(p => {
     const enrollmentId = enrollmentIdFor_(p);
-    const consent = consentByKey.get(matchKey_(p)) || findBestConsent_(p, consents);
     const manual = manualFollowup.get(enrollmentId) || {};
+    const manualMatch = manualMatchByEnrollment.get(enrollmentId) || {};
+    const match = selectConsentMatch_(p, consents, manualMatch);
+    const consent = match.accepted ? match.consent : null;
     const followStatus = p['Follow Up Needed'] === 'Yes' ? (manual['Follow Up Status'] || p['Follow Up Status'] || config.defaultFollowUpStatus) : 'Not Needed';
-    const consentStatus = consent ? consent['Consent Status'] : config.defaultConsentStatus;
-    const ready = isReady_(p['Follow Up Needed'], followStatus, consentStatus);
+    const consentStatus = consent ? consent['Consent Status'] : (match.needsReview ? 'Review' : config.defaultConsentStatus);
+    const ready = isReadyWithMatch_(p['Follow Up Needed'], followStatus, consentStatus, match);
+    const enrollmentStatus = ready === 'Yes' ? 'Ready for DARTS' : (match.needsReview ? 'Ready for Review' : config.defaultEnrollmentStatus);
     return {
       'EnrollmentID': enrollmentId,
       'Child Full Name': p['Child Full Name'],
@@ -493,12 +537,63 @@ function buildMasterEnrollment_(prescreens, consents, manualFollowup, config) {
       'Neurodivergent Response': p['Neurodivergent Response'],
       'Follow Up Needed': p['Follow Up Needed'],
       'Follow Up Status': followStatus,
-      'Enrollment Status': ready === 'Yes' ? 'Ready for DARTS' : config.defaultEnrollmentStatus,
+      'Enrollment Status': enrollmentStatus,
       'Ready for DARTS': ready,
       'Prescreening ResponseID': p['ResponseID'],
       'Consent ResponseID': consent ? consent['ResponseID'] : '',
+      'Match Status': match.status,
+      'Match Confidence Score': match.score,
+      'Match Reasons': match.reasons.join('; '),
+      'Needs Match Review': match.needsReview ? 'Yes' : 'No',
+      'Possible Consent Matches': match.possibleMatches,
+      'Manual Consent ResponseID': manualMatch['Manual Consent ResponseID'] || '',
+      'Manual Match Notes': manualMatch['Manual Match Notes'] || '',
       'Last Updated': new Date(),
       'Notes': manual['Notes'] || ''
+    };
+  });
+}
+
+
+function buildMatchReview_(master) {
+  return master.filter(m => m['Needs Match Review'] === 'Yes').map(m => ({
+    'EnrollmentID': m['EnrollmentID'],
+    'Prescreening ResponseID': m['Prescreening ResponseID'],
+    'Child Full Name': m['Child Full Name'],
+    'Parent/Caretaker Name': m['Parent/Caretaker Name'],
+    'Parent Email': m['Parent Email'],
+    'Parent Phone': m['Parent Phone'],
+    'Match Status': m['Match Status'],
+    'Match Confidence Score': m['Match Confidence Score'],
+    'Match Reasons': m['Match Reasons'],
+    'Possible Consent Matches': m['Possible Consent Matches'],
+    'Manual Consent ResponseID': m['Manual Consent ResponseID'],
+    'Manual Match Notes': m['Manual Match Notes'],
+    'Review Status': 'Needs Review',
+    'Last Updated': m['Last Updated'] || new Date()
+  }));
+}
+
+function buildUnmatchedConsent_(prescreens, consents, master) {
+  const acceptedConsentIds = new Set(master.map(m => String(m['Consent ResponseID'] || '')).filter(Boolean));
+  return consents.filter(c => !acceptedConsentIds.has(String(c['ResponseID'] || ''))).map(c => {
+    const ranked = prescreens.map(p => ({prescreen: p, match: scoreConsentMatch_(p, c)}))
+      .filter(item => item.match.score > 0)
+      .sort((a, b) => b.match.score - a.match.score);
+    const best = ranked[0];
+    return {
+      'Consent ResponseID': c['ResponseID'],
+      'Submitted At': c['Submitted At'],
+      'Child Full Name': c['Child Full Name'],
+      'Parent Full Name': c['Parent Full Name'],
+      'Parent Email': c['Parent Email'],
+      'Parent Phone': c['Parent Phone'],
+      'Consent Status': c['Consent Status'],
+      'Best Prescreening Match': best ? `${best.prescreen['Child Full Name'] || '(missing child)'} / ${best.prescreen['Parent Email'] || best.prescreen['Parent Phone'] || '(no contact)'} / ${best.prescreen['ResponseID']}` : '',
+      'Best Match Score': best ? best.match.score : 0,
+      'Match Reasons': best ? best.match.reasons.join('; ') : 'No prescreening record with overlapping child/parent identifiers',
+      'Review Status': best && best.match.score >= 40 ? 'Needs Review' : 'Unmatched',
+      'Notes': ''
     };
   });
 }
@@ -627,6 +722,193 @@ function applyOutputFormatting_(sheet, dataRows, columns) {
   range.setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP).setVerticalAlignment('middle');
   sheet.setRowHeights(2, rowsToFormat, 24);
 }
+
+function ensureMasterMatchColumns_(ss) {
+  appendMissingHeaders_(ss.getSheetByName(SHEETS.MASTER), MASTER_MATCH_FIELDS);
+}
+
+function ensureAuxiliaryMatchSheets_(ss) {
+  ensureSheetWithHeaders_(ss, MATCH_REVIEW_SHEET, MATCH_REVIEW_HEADERS.concat(['Review Status']));
+  ensureSheetWithHeaders_(ss, UNMATCHED_CONSENT_SHEET, UNMATCHED_CONSENT_HEADERS);
+}
+
+function ensureSheetWithHeaders_(ss, sheetName, headers) {
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) sheet = ss.insertSheet(sheetName);
+  if (sheet.getLastColumn() < headers.length) sheet.insertColumnsAfter(Math.max(sheet.getLastColumn(), 1), headers.length - Math.max(sheet.getLastColumn(), 1));
+  const existing = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), headers.length)).getValues()[0].map(String);
+  if (!existing.some(Boolean)) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    return sheet;
+  }
+  appendMissingHeaders_(sheet, headers);
+  return sheet;
+}
+
+function appendMissingHeaders_(sheet, fields) {
+  if (!sheet) return;
+  const lastColumn = Math.max(sheet.getLastColumn(), 1);
+  const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0].map(String);
+  fields.forEach(field => {
+    if (headers.includes(field)) return;
+    sheet.getRange(1, sheet.getLastColumn() + 1).setValue(field);
+    headers.push(field);
+  });
+}
+
+function readManualMatchState_(sheet) {
+  const rows = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW);
+  const map = new Map();
+  rows.forEach(r => {
+    if (!r['EnrollmentID']) return;
+    map.set(String(r['EnrollmentID']), {
+      'Manual Consent ResponseID': String(r['Manual Consent ResponseID'] || '').trim(),
+      'Manual Match Notes': String(r['Manual Match Notes'] || '').trim()
+    });
+  });
+  return map;
+}
+
+function selectConsentMatch_(prescreen, consents, manualMatch) {
+  const manualConsentId = String(manualMatch['Manual Consent ResponseID'] || '').trim();
+  if (manualConsentId) {
+    const manualConsent = consents.find(c => String(c['ResponseID'] || '') === manualConsentId);
+    if (manualConsent) return {
+      consent: manualConsent,
+      accepted: true,
+      status: 'Manual Match',
+      score: 100,
+      reasons: ['Manual Consent ResponseID override'],
+      needsReview: false,
+      possibleMatches: describeConsentMatch_(manualConsent, 100, ['Manual Consent ResponseID override'])
+    };
+    return {
+      consent: null,
+      accepted: false,
+      status: 'Manual Match Missing',
+      score: 0,
+      reasons: [`Manual Consent ResponseID not found: ${manualConsentId}`],
+      needsReview: true,
+      possibleMatches: ''
+    };
+  }
+
+  const ranked = rankConsentMatches_(prescreen, consents);
+  if (!ranked.length) return {
+    consent: null,
+    accepted: false,
+    status: 'No Consent Yet',
+    score: 0,
+    reasons: ['No submitted consent record shares enough identifiers with this prescreening record'],
+    needsReview: false,
+    possibleMatches: ''
+  };
+
+  const best = ranked[0];
+  const second = ranked[1];
+  const closeSecond = second && best.score - second.score < 10;
+  const strongIdentifier = best.reasons.some(reason => /email exact|phone exact/i.test(reason));
+  const accepted = best.score >= 80 && !closeSecond && strongIdentifier;
+  const probable = !accepted && best.score >= 60;
+  const needsReview = !accepted && best.score >= 40;
+  return {
+    consent: best.consent,
+    accepted,
+    status: accepted ? 'Matched' : (probable ? 'Probable Match - Review' : (needsReview ? 'Needs Review' : 'No Consent Yet')),
+    score: best.score,
+    reasons: closeSecond ? best.reasons.concat(['Another consent record has a similar score; manual review recommended']) : best.reasons,
+    needsReview: probable || needsReview || Boolean(closeSecond),
+    possibleMatches: ranked.slice(0, 3).map(item => describeConsentMatch_(item.consent, item.score, item.reasons)).join(' | ')
+  };
+}
+
+function rankConsentMatches_(prescreen, consents) {
+  return consents.map(consent => {
+    const scored = scoreConsentMatch_(prescreen, consent);
+    return {consent, score: scored.score, reasons: scored.reasons};
+  }).filter(item => item.score > 0).sort((a, b) => b.score - a.score);
+}
+
+function scoreConsentMatch_(prescreen, consent) {
+  const reasons = [];
+  let score = 0;
+  const pChild = nameProfile_(prescreen['Child Full Name']);
+  const cChild = nameProfile_(consent['Child Full Name']);
+  const pParent = nameProfile_(prescreen['Parent/Caretaker Name']);
+  const cParent = nameProfile_(consent['Parent Full Name']);
+  const pEmail = normalizeEmail_(prescreen['Parent Email']);
+  const cEmail = normalizeEmail_(consent['Parent Email']);
+  const pPhone = normalizePhoneDigits_(prescreen['Parent Phone']);
+  const cPhone = normalizePhoneDigits_(consent['Parent Phone']);
+
+  if (pChild.full && cChild.full && pChild.full === cChild.full) { score += 40; reasons.push('Child full name exact'); }
+  else if (pChild.last && cChild.last && pChild.last === cChild.last && pChild.first && cChild.first && initialsCompatible_(pChild.first, cChild.first)) {
+    score += 30; reasons.push('Child first/last name compatible');
+  } else {
+    const sim = similarity_(pChild.full, cChild.full);
+    if (sim >= 0.88) { score += 25; reasons.push(`Child name very similar (${Math.round(sim * 100)}%)`); }
+    else if (sim >= 0.75) { score += 15; reasons.push(`Child name somewhat similar (${Math.round(sim * 100)}%)`); }
+  }
+  if (pEmail && cEmail && pEmail === cEmail) { score += 40; reasons.push('Parent email exact'); }
+  if (pPhone && cPhone && pPhone === cPhone) { score += 35; reasons.push('Parent phone exact'); }
+  if (pParent.full && cParent.full && pParent.full === cParent.full) { score += 15; reasons.push('Parent/caretaker name exact'); }
+  else {
+    const parentSim = similarity_(pParent.full, cParent.full);
+    if (parentSim >= 0.85) { score += 10; reasons.push(`Parent/caretaker name similar (${Math.round(parentSim * 100)}%)`); }
+  }
+  if (pChild.last && cChild.last && pChild.last === cChild.last) { score += 5; reasons.push('Child last name exact'); }
+  if (gradeCompatible_(prescreen['Child Grade'], consent['Grade'])) { score += 5; reasons.push('Grade compatible'); }
+  return {score: Math.min(score, 100), reasons};
+}
+
+function describeConsentMatch_(consent, score, reasons) {
+  return `${consent['ResponseID'] || '(no response id)'}: ${consent['Child Full Name'] || '(missing child)'} / ${consent['Parent Email'] || consent['Parent Phone'] || '(no contact)'} / score ${score} (${reasons.join(', ')})`;
+}
+
+function nameProfile_(value) {
+  const full = normalizeNameForMatch_(value);
+  const parts = full.split(' ').filter(Boolean);
+  return {full, first: parts[0] || '', last: parts.length > 1 ? parts[parts.length - 1] : ''};
+}
+
+function normalizeNameForMatch_(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(part => part && part.length > 1).join(' ');
+}
+
+function initialsCompatible_(a, b) {
+  return a === b || (a && b && a[0] === b[0]);
+}
+
+function similarity_(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const distance = levenshtein_(a, b);
+  return 1 - (distance / Math.max(a.length, b.length));
+}
+
+function levenshtein_(a, b) {
+  const prev = Array.from({length: b.length + 1}, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    for (let j = 0; j < curr.length; j++) prev[j] = curr[j];
+  }
+  return prev[b.length];
+}
+
+function gradeCompatible_(a, b) {
+  const left = normalizeToken_(a);
+  const right = normalizeToken_(b);
+  const leftNumber = (String(a || '').match(/\d+/) || [''])[0];
+  const rightNumber = (String(b || '').match(/\d+/) || [''])[0];
+  return Boolean(left && right && (left === right || left.replace(/grade$/, '') === right.replace(/grade$/, '') || (leftNumber && leftNumber === rightNumber)));
+}
+
+function normalizePhoneDigits_(v) { return String(v || '').replace(/\D/g, '').slice(-10); }
+function isReadyWithMatch_(needed, status, consentStatus, match) { return match.accepted && isReady_(needed, status, consentStatus) === 'Yes' ? 'Yes' : (match.needsReview ? 'Review' : 'No'); }
+
 function readManualFollowupState_(sheet) {
   const rows = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW);
   const map = new Map();
@@ -815,14 +1097,13 @@ function flattenPayload_(payload, prefix = '', out = {}) {
 function normalizeHeaderKey_(value) { return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
 function enrollmentIdFor_(p) { return `ENR-${matchKey_(p) || normalizeToken_(p['ResponseID'])}`.toUpperCase(); }
 function matchKey_(r) { return [normalizeToken_(r['Child Full Name']), normalizeEmail_(r['Parent Email']) || normalizePhone_(r['Parent Phone'])].filter(Boolean).join('|'); }
-function findBestConsent_(p, consents) { return consents.find(c => normalizeToken_(c['Child Full Name']) === normalizeToken_(p['Child Full Name'])) || null; }
 function isReady_(needed, status, consentStatus) { return consentStatus === 'Completed' && (needed !== 'Yes' || status === 'Completed') ? 'Yes' : 'No'; }
 function followupReason_(p) { return ['Neurodivergent/disability response', p['Conditions/Diagnoses'] && 'Conditions/diagnoses listed', p['Physical Disability Supports'] && 'Physical support needs'].filter(Boolean).join('; '); }
 function cleanName_(v) { return String(v || '').trim().replace(/\s+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()); }
 function normalizeEmail_(v) { return String(v || '').trim().toLowerCase(); }
 function normalizePhone_(v) { const d = String(v || '').replace(/\D/g, ''); return d.length === 10 ? `${d.slice(0,3)}-${d.slice(3,6)}-${d.slice(6)}` : String(v || '').trim(); }
 function normalizeToken_(v) { return String(v || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
-function countRows_(ss, name) { return readObjects_(ss.getSheetByName(name), CLEAN_HEADER_ROW, DATA_START_ROW).length; }
-function countWhere_(ss, name, field, expected) { return readObjects_(ss.getSheetByName(name), CLEAN_HEADER_ROW, DATA_START_ROW).filter(r => r[field] === expected).length; }
+function countRows_(ss, name) { const sheet = ss.getSheetByName(name); return sheet ? readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW).length : 0; }
+function countWhere_(ss, name, field, expected) { const sheet = ss.getSheetByName(name); return sheet ? readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW).filter(r => r[field] === expected).length : 0; }
 function jsonResponse_(obj) { return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON); }
 function ensureRequiredSheets_(ss) { Object.values(SHEETS).forEach(n => { if (!ss.getSheetByName(n)) throw new Error(`Missing required sheet: ${n}`); }); }

@@ -154,7 +154,7 @@
       const consent = document.getElementById('filterConsent').value;
       const ready = document.getElementById('filterReady').value;
       return source.filter(p => {
-        const hay = [p.childName,p.parentName,p.parentEmail,p.conditions,p.supportDetails,p.eligibilityReviewStatus].join(' ').toLowerCase();
+        const hay = [p.childName,p.parentName,p.parentEmail,p.conditions,p.supportDetails,p.eligibilityReviewStatus,p.matchStatus,p.matchReasons].join(' ').toLowerCase();
         return (!q || hay.includes(q)) && (!follow || p.followUpStatus === follow) && (!consent || p.consentStatus === consent) && (!ready || p.readyForDarts === ready);
       });
     }
@@ -167,11 +167,11 @@
 
     function renderTable(rows) {
       document.getElementById('content').innerHTML = `<h2>${titleForView()}</h2><table><thead><tr>
-        <th>Child</th><th>Parent</th><th>Neurodivergent</th><th>Follow-Up</th><th>Consent</th><th>Ready</th><th>Support Details</th><th>Review</th><th></th>
-      </tr></thead><tbody>${rows.map(rowHtml).join('') || '<tr><td colspan="9">No records match the current filters.</td></tr>'}</tbody></table>`;
+        <th>Child</th><th>Parent</th><th>Neurodivergent</th><th>Follow-Up</th><th>Consent</th><th>Match</th><th>Ready</th><th>Support Details</th><th>Review</th><th></th>
+      </tr></thead><tbody>${rows.map(rowHtml).join('') || '<tr><td colspan="10">No records match the current filters.</td></tr>'}</tbody></table>`;
     }
     function rowHtml(p) {
-      return `<tr><td><strong>${escapeHtml(p.childName)}</strong><br><small>${escapeHtml(p.enrollmentId)}</small></td><td>${escapeHtml(p.parentName)}<br><small>${escapeHtml(p.parentEmail)}</small></td><td>${badge(p.neurodivergentResponse)}</td><td>${badge(p.followUpNeeded === 'Yes' ? p.followUpStatus || 'Needed' : 'Not Needed')}</td><td>${badge(p.consentStatus)}</td><td>${badge(p.readyForDarts)}</td><td><div class="text-preview" title="${escapeAttr(p.supportDetails)}">${escapeHtml(p.supportDetails)}</div></td><td>${badge(p.eligibilityReviewStatus)}</td><td><button class="secondary" onclick="openParticipant('${escapeAttr(p.enrollmentId)}')">Details</button></td></tr>`;
+      return `<tr><td><strong>${escapeHtml(p.childName)}</strong><br><small>${escapeHtml(p.enrollmentId)}</small></td><td>${escapeHtml(p.parentName)}<br><small>${escapeHtml(p.parentEmail)}</small></td><td>${badge(p.neurodivergentResponse)}</td><td>${badge(p.followUpNeeded === 'Yes' ? p.followUpStatus || 'Needed' : 'Not Needed')}</td><td>${badge(p.consentStatus)}</td><td>${badge(p.matchStatus || 'No Consent Yet')}<br><small>${escapeHtml(p.matchConfidenceScore || 0)}%</small></td><td>${badge(p.readyForDarts)}</td><td><div class="text-preview" title="${escapeAttr(p.supportDetails)}">${escapeHtml(p.supportDetails)}</div></td><td>${badge(p.eligibilityReviewStatus)}</td><td><button class="secondary" onclick="openParticipant('${escapeAttr(p.enrollmentId)}')">Details</button></td></tr>`;
     }
     function titleForView(){ return {participants:'Participant Enrollment Pipeline', followups:'Follow-Up Queue', review:'Needs Review', ready:'Ready for DARTS'}[currentView] || 'Participants'; }
 
@@ -191,7 +191,7 @@
       document.getElementById('modalBody').innerHTML = `<div class="grid">
         ${info('Parent', p.parentName)}${info('Email', p.parentEmail)}${info('Phone', p.parentPhone)}${info('Grade', p.grade)}
         ${info('Neurodivergent Response', p.neurodivergentResponse)}${info('Conditions/Diagnoses', p.conditions)}
-        ${info('Consent Status', p.consentStatus)}${info('Ready for DARTS', p.readyForDarts)}
+        ${info('Consent Status', p.consentStatus)}${info('Match Status', (p.matchStatus || '') + (p.matchConfidenceScore ? ' (' + p.matchConfidenceScore + '%)' : ''))}${info('Match Reasons', p.matchReasons)}${info('Ready for DARTS', p.readyForDarts)}
       </div>
       <div class="field"><label>Original Support Details</label><textarea readonly>${escapeHtml(p.originalSupportDetails)}</textarea></div>
       <div class="grid">
