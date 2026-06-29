@@ -172,17 +172,17 @@ function doGet(e) {
 
 function renderDashboardHtml_() {
   const template = HtmlService.createTemplateFromFile('Dashboard');
-  template.initialData = Utilities.base64Encode(JSON.stringify(safeGetProfessorDashboardData_()));
+  template.initialData = Utilities.base64Encode(JSON.stringify(safeGetAppDashboardData_()));
   return template.evaluate()
     .setTitle('G4G Professor Dashboard')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-function safeGetProfessorDashboardData_() {
+function safeGetAppDashboardData_() {
   try {
-    return getProfessorDashboardData();
+    return getAppDashboardData();
   } catch (err) {
-    return {generatedAt: new Date().toISOString(), error: String(err), participants: [], followups: [], ready: [], needsReview: [], summary: {}};
+    return {generatedAt: new Date().toISOString(), error: String(err), metrics: {}, participants: [], followups: [], ready: [], needsReview: [], matchReview: [], unmatchedConsents: [], prescreens: [], consents: [], dashboardRows: [], activity: [], reports: {actionItems: []}, urls: {}, setup: {error: String(err)}};
   }
 }
 
@@ -244,6 +244,148 @@ function getProfessorDashboardData() {
 function refreshProfessorDashboardData() {
   return buildProfessorDashboardData_(true);
 }
+
+function getAppDashboardData() {
+  return buildAppDashboardData_(false);
+}
+
+function refreshAppDashboardData() {
+  return buildAppDashboardData_(true);
+}
+
+function buildAppDashboardData_(shouldRefresh) {
+  if (shouldRefresh) refreshEnrollmentTracker();
+  const ss = getSpreadsheet_();
+  const professor = buildProfessorDashboardData_(false);
+  const dashboardRows = readDashboardMetricRows_(ss);
+  const matchReview = readObjectsOrEmpty_(ss, MATCH_REVIEW_SHEET);
+  const unmatchedConsents = readObjectsOrEmpty_(ss, UNMATCHED_CONSENT_SHEET);
+  const prescreens = readObjectsOrEmpty_(ss, SHEETS.PRESCREEN_CLEAN);
+  const consents = readObjectsOrEmpty_(ss, SHEETS.CONSENT_CLEAN);
+  const master = readObjectsOrEmpty_(ss, SHEETS.MASTER);
+  const followups = readObjectsOrEmpty_(ss, SHEETS.FOLLOWUP);
+  const ready = readObjectsOrEmpty_(ss, SHEETS.READY);
+  return {
+    generatedAt: new Date().toISOString(),
+    spreadsheetName: ss.getName(),
+    metrics: buildCommandCenterMetrics_(professor.summary, dashboardRows, matchReview, unmatchedConsents),
+    dashboardRows,
+    participants: professor.participants,
+    followups: professor.followups,
+    needsReview: professor.needsReview,
+    ready: professor.ready,
+    matchReview,
+    unmatchedConsents,
+    prescreens,
+    consents,
+    master,
+    rawCounts: {
+      prescreening: readRawRows_(ss.getSheetByName(SHEETS.PRESCREEN_RAW)).length,
+      consent: readRawRows_(ss.getSheetByName(SHEETS.CONSENT_RAW)).length
+    },
+    activity: buildActivityFeed_(prescreens, consents, followups, matchReview, unmatchedConsents),
+    reports: buildReportData_(professor.participants, followups, matchReview, unmatchedConsents, ready),
+    setup: getSheetSetupStatus_(),
+    urls: {
+      webApp: getWebAppUrl_(),
+      prescreeningWebhook: buildWebhookUrl_('prescreening'),
+      consentWebhook: buildWebhookUrl_('consent')
+    }
+  };
+}
+
+function readObjectsOrEmpty_(ss, sheetName) {
+  const sheet = ss.getSheetByName(sheetName);
+  return sheet ? readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW) : [];
+}
+
+function readDashboardMetricRows_(ss) {
+  const sheet = ss.getSheetByName(SHEETS.DASHBOARD);
+  if (!sheet) return [];
+  return sheet.getDataRange().getValues().slice(2).filter(row => row[0]).map(row => ({
+    metric: String(row[0] || ''),
+    value: Number(row[1] || 0),
+    source: row[2] || '',
+    interpretation: row[3] || ''
+  }));
+}
+
+function buildCommandCenterMetrics_(summary, dashboardRows, matchReview, unmatchedConsents) {
+  const metricMap = new Map(dashboardRows.map(row => [row.metric, row.value]));
+  return {
+    prescreened: metricMap.get('Total Prescreening Submitted') || summary.prescreened || 0,
+    consentSubmitted: metricMap.get('Total Consent Submitted') || summary.consentSubmitted || 0,
+    masterRecords: metricMap.get('Total Master Enrollment Records') || summary.masterRecords || 0,
+    neurodivergentYes: summary.neurodivergentYes || 0,
+    followUpNeeded: metricMap.get('Follow Up Needed') || summary.followUpNeeded || 0,
+    followUpCompleted: metricMap.get('Follow Up Completed') || summary.followUpCompleted || 0,
+    consentCompleted: metricMap.get('Consent Completed') || summary.consentCompleted || 0,
+    readyForDarts: metricMap.get('Ready for DARTS') || summary.readyForDarts || 0,
+    needsReview: metricMap.get('Needs Review') || summary.needsReview || 0,
+    matchReviewNeeded: matchReview.length,
+    unmatchedConsent: unmatchedConsents.length
+  };
+}
+
+function buildActivityFeed_(prescreens, consents, followups, matchReview, unmatchedConsents) {
+  const items = [];
+  prescreens.slice(-8).forEach(row => items.push({type: 'Prescreening', title: row['Child Full Name'] || 'Prescreening submitted', detail: row['Parent Email'] || row['Parent/Caretaker Name'] || '', when: row['Submitted At'] || ''}));
+  consents.slice(-8).forEach(row => items.push({type: 'Consent', title: row['Child Full Name'] || 'Consent submitted', detail: row['Parent Email'] || row['Parent Full Name'] || '', when: row['Submitted At'] || ''}));
+  followups.filter(row => row['Follow Up Status'] && row['Follow Up Status'] !== 'Not Started').slice(-8).forEach(row => items.push({type: 'Follow-Up', title: row['Child Full Name'] || row['EnrollmentID'], detail: row['Follow Up Status'], when: row['Follow Up Completed Date'] || row['Email Sent Date'] || ''}));
+  matchReview.slice(-8).forEach(row => items.push({type: 'Match Review', title: row['Child Full Name'] || row['EnrollmentID'], detail: row['Match Status'] || 'Needs Review', when: row['Last Updated'] || ''}));
+  unmatchedConsents.slice(-8).forEach(row => items.push({type: 'Unmatched Consent', title: row['Child Full Name'] || row['Consent ResponseID'], detail: row['Best Prescreening Match'] || 'No confident match', when: row['Submitted At'] || ''}));
+  return items.sort((a, b) => String(b.when || '').localeCompare(String(a.when || ''))).slice(0, 15);
+}
+
+function buildReportData_(participants, followups, matchReview, unmatchedConsents, ready) {
+  return {
+    followupStatus: groupCounts_(followups, 'Follow Up Status'),
+    consentStatus: groupCounts_(participants, 'consentStatus'),
+    readiness: groupCounts_(participants, 'readyForDarts'),
+    matchStatus: groupCounts_(participants, 'matchStatus'),
+    reviewStatus: groupCounts_(participants, 'eligibilityReviewStatus'),
+    actionItems: [
+      {label: 'Follow-ups not started', value: followups.filter(row => !row['Follow Up Status'] || row['Follow Up Status'] === 'Not Started').length},
+      {label: 'Follow-ups awaiting response', value: followups.filter(row => row['Follow Up Status'] === 'Awaiting Response').length},
+      {label: 'Match review needed', value: matchReview.length},
+      {label: 'Unmatched consent records', value: unmatchedConsents.length},
+      {label: 'Ready for DARTS export', value: ready.length}
+    ]
+  };
+}
+
+function groupCounts_(rows, field) {
+  return rows.reduce((acc, row) => {
+    const key = String(row[field] || 'Missing');
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+}
+
+function approveConsentMatch(update) {
+  const ss = getSpreadsheet_();
+  ensureMasterMatchColumns_(ss);
+  const sheet = ss.getSheetByName(SHEETS.MASTER);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const enrollmentCol = headers.indexOf('EnrollmentID') + 1;
+  const prescreenCol = headers.indexOf('Prescreening ResponseID') + 1;
+  const manualConsentCol = headers.indexOf('Manual Consent ResponseID') + 1;
+  const notesCol = headers.indexOf('Manual Match Notes') + 1;
+  if (manualConsentCol < 1 || notesCol < 1) throw new Error('Manual match columns are missing from Master_Enrollment. Refresh the tracker and try again.');
+  const enrollmentId = String(update.enrollmentId || '').trim();
+  const prescreeningResponseId = String(update.prescreeningResponseId || '').trim();
+  const consentResponseId = String(update.consentResponseId || '').trim();
+  if (!consentResponseId) throw new Error('Consent ResponseID is required to approve a match.');
+  const values = sheet.getDataRange().getValues();
+  const targetIndex = values.findIndex((row, index) => index > 0 && ((enrollmentId && String(row[enrollmentCol - 1]) === enrollmentId) || (prescreeningResponseId && String(row[prescreenCol - 1]) === prescreeningResponseId)));
+  if (targetIndex < 1) throw new Error('Could not find the selected prescreening/master record to approve this match.');
+  const targetRow = targetIndex + 1;
+  sheet.getRange(targetRow, manualConsentCol).setValue(consentResponseId);
+  sheet.getRange(targetRow, notesCol).setValue(update.notes || `Approved manually on ${new Date().toISOString()}`);
+  refreshEnrollmentTracker();
+  return buildAppDashboardData_(false);
+}
+
 
 function buildProfessorDashboardData_(shouldRefresh) {
   if (shouldRefresh) refreshEnrollmentTracker();
@@ -398,7 +540,7 @@ function updateFollowupReview(updates) {
     if (col > 0) sheet.getRange(targetRow, col).setValue(updates[field]);
   });
   refreshEnrollmentTracker();
-  return getProfessorDashboardData();
+  return buildAppDashboardData_(false);
 }
 
 function ensureFollowupReviewColumns_(ss) {
