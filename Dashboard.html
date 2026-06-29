@@ -90,7 +90,8 @@
   </div>
 
   <script>
-    let dashboard = {participants:[], followups:[], ready:[], needsReview:[], summary:{}};
+    window.__INITIAL_DASHBOARD_DATA__ = JSON.parse(atob('<?!= initialData ?>'));
+    let dashboard = window.__INITIAL_DASHBOARD_DATA__ || {participants:[], followups:[], ready:[], needsReview:[], summary:{}};
     let currentView = 'participants';
     let autoRefresh = true;
     let timer = null;
@@ -234,7 +235,15 @@
     function scheduleRefresh(){ clearTimeout(timer); if(autoRefresh) timer=setTimeout(()=>{ loadDashboard(false); scheduleRefresh(); }, 60000); }
     function escapeHtml(value){ return String(value || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
     function escapeAttr(value){ return escapeHtml(value).replace(/'/g, '&#39;'); }
-    loadDashboard(false); scheduleRefresh();
+    if (dashboard && dashboard.generatedAt) {
+      hydrateFilters();
+      renderCards();
+      renderCurrentView();
+      document.getElementById('status').textContent = dashboard.error ? ('Dashboard error: ' + dashboard.error) : ('Last updated: ' + new Date(dashboard.generatedAt).toLocaleString());
+    } else {
+      loadDashboard(false);
+    }
+    scheduleRefresh();
   </script>
 </body>
 </html>

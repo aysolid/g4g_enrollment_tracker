@@ -75,10 +75,7 @@ function showTrackerSidebar() {
 }
 
 function showProfessorDashboard() {
-  const html = HtmlService.createHtmlOutputFromFile('Dashboard')
-    .setTitle('G4G Professor Dashboard')
-    .setWidth(1200)
-    .setHeight(800);
+  const html = renderDashboardHtml_().setWidth(1200).setHeight(800);
   SpreadsheetApp.getUi().showModalDialog(html, 'G4G Professor Dashboard');
 }
 
@@ -148,10 +145,28 @@ function buildWebhookUrl_(formType) {
 /** Serves the deployed web app URL. This prevents "Script function not found: doGet". */
 function doGet(e) {
   const view = String(e && e.parameter && e.parameter.view || 'dashboard').toLowerCase();
-  const file = view === 'sidebar' ? 'Sidebar' : 'Dashboard';
-  return HtmlService.createHtmlOutputFromFile(file)
-    .setTitle(view === 'sidebar' ? 'G4G Enrollment Tracker' : 'G4G Professor Dashboard')
+  if (view === 'sidebar') {
+    return HtmlService.createHtmlOutputFromFile('Sidebar')
+      .setTitle('G4G Enrollment Tracker')
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  }
+  return renderDashboardHtml_();
+}
+
+function renderDashboardHtml_() {
+  const template = HtmlService.createTemplateFromFile('Dashboard');
+  template.initialData = Utilities.base64Encode(JSON.stringify(safeGetProfessorDashboardData_()));
+  return template.evaluate()
+    .setTitle('G4G Professor Dashboard')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function safeGetProfessorDashboardData_() {
+  try {
+    return getProfessorDashboardData();
+  } catch (err) {
+    return {generatedAt: new Date().toISOString(), error: String(err), participants: [], followups: [], ready: [], needsReview: [], summary: {}};
+  }
 }
 
 /** Receives QuestionPro webhook payloads. Deploy as a web app for webhook use. */
@@ -580,13 +595,7 @@ function isMeaningfulRawRow_(row) {
   const timestamp = String(row['Timestamp (mm/dd/yyyy)'] || row['Timestamp'] || '').trim();
   const email = String(row['Respondent Email'] || row['Email Address:'] || row['Email Address'] || '').trim();
   const payload = String(row['Custom Variable 5'] || row['External Reference'] || '').trim();
-  const namedFields = [responseId, timestamp, email, payload].some(Boolean);
-  if (namedFields) return true;
-  return Object.values(row).some(value => {
-    if (value === null || value === undefined || value === false) return false;
-    const text = String(value).trim();
-    return text !== '' && text !== 'FALSE';
-  });
+  return [responseId, timestamp, email, payload].some(Boolean);
 }
 
 function readObjects_(sheet, headerRow, dataStartRow) {
