@@ -53,7 +53,6 @@
       <h2 id="pageTitle">Dashboard</h2>
       <input class="search" id="globalSearch" placeholder="Search child, parent, email, notes…" oninput="renderPage()">
       <div class="spacer"></div>
-      <button class="btn soft" onclick="loadData()">Reload View</button>
       <span class="status" id="status">Loading…</span>
     </div>
     <main id="content"></main>
@@ -88,8 +87,8 @@ function renderDashboard(){
 }
 function cards(items){return `<div class="cards">${items.map(([label,value,icon,accent,note])=>`<div class="card ${accent}"><div class="icon">${icon}</div><div class="metric-label">${label}</div><div class="metric-value">${value||0}</div><div class="metric-note">${note||''}</div></div>`).join('')}</div>`;}
 function funnel(){const m=data.metrics||{};const rows=[['Prescreened',m.prescreened],['Consent submitted',m.consentSubmitted],['Consent completed',m.consentCompleted],['Follow-up completed',m.followUpCompleted],['Consent matched / master',m.masterRecords],['Ready for DARTS',m.readyForDarts]];const max=Math.max(1,...rows.map(r=>Number(r[1]||0)));return rows.map(([label,value])=>`<div class="funnel-row"><strong>${label}</strong><div class="bar"><span style="width:${Math.round((value||0)/max*100)}%"></span></div><strong>${value||0}</strong></div>`).join('');}
-function actionItems(){const items=(data.reports&&data.reports.actionItems)||[];return items.map(i=>`<div class="action split"><div><strong>${escapeHtml(i.label)}</strong><small>${i.value? 'Needs attention':'No current action'}</small></div><span class="badge ${i.value?'b-orange':'b-green'}">${i.value}</span></div>`).join('')||empty('No action items.');}
-function activityList(items){return items.map(i=>`<div class="event"><div class="event-dot">${iconFor(i.type)}</div><div><strong>${escapeHtml(i.title)}</strong><small>${escapeHtml(i.type)} • ${escapeHtml(i.detail)} • ${formatDate(i.when)}</small></div></div>`).join('')||empty('No recent activity.');}
+function actionItems(){const items=(data.reports&&data.reports.actionItems)||[];return items.map(i=>`<div class="action split"><div><strong>${esc(i.label)}</strong><small>${i.value? 'Needs attention':'No current action'}</small></div><span class="badge ${i.value?'b-orange':'b-green'}">${i.value}</span></div>`).join('')||empty('No action items.');}
+function activityList(items){return items.map(i=>`<div class="event"><div class="event-dot">${iconFor(i.type)}</div><div><strong>${esc(i.title)}</strong><small>${esc(i.type)} • ${esc(i.detail)} • ${formatDate(i.when)}</small></div></div>`).join('')||empty('No recent activity.');}
 function iconFor(t){return /consent/i.test(t)?'✓':/follow/i.test(t)?'✉':/match/i.test(t)?'↔':'•'}
 
 function renderParticipantTable(label, rows){content(`<div class="toolbar"><select id="filterFollow" onchange="renderPage()"><option value="">All follow-up</option>${options(unique((data.participants||[]).map(p=>p.followUpStatus)))}</select><select id="filterConsent" onchange="renderPage()"><option value="">All consent</option>${options(unique((data.participants||[]).map(p=>p.consentStatus)))}</select><select id="filterReady" onchange="renderPage()"><option value="">All readiness</option><option>Yes</option><option>No</option><option>Review</option></select></div><div class="tablewrap"><table><thead><tr><th>Child</th><th>Parent</th><th>Neurodivergent</th><th>Follow-Up</th><th>Consent</th><th>Match</th><th>Ready</th><th>Support Details</th><th>Review</th><th></th></tr></thead><tbody>${rows.map(participantRow).join('')||rowEmpty(10,label)}</tbody></table></div>`);}
@@ -133,7 +132,7 @@ function attr(v){return esc(v).replace(/`/g,'&#96;');}
 function val(id){return document.getElementById(id)?.value||'';} function setValue(id,v){const el=document.getElementById(id);if(el)el.value=v||'';}
 function formatDate(v){if(!v)return 'Not available';const d=new Date(v);return isNaN(d)?String(v):d.toLocaleString();}
 function setStatus(t){document.getElementById('status').textContent=t;}
-if(data&&data.generatedAt){hydrateNav();renderPage();setStatus('Last updated: '+formatDate(data.generatedAt));}else{loadData();}
+if(data&&data.generatedAt){hydrateNav();renderPage();setStatus('Loaded from spreadsheet: '+formatDate(data.generatedAt));}else{setStatus('Dashboard data was not available. Reload the browser page after checking Apps Script deployment permissions.');}
 </script>
 </body>
 </html>

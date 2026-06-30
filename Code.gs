@@ -76,6 +76,7 @@ function onOpen() {
     .addItem('Open tracker sidebar', 'showTrackerSidebar')
     .addItem('Open professor dashboard', 'showProfessorDashboard')
     .addItem('Refresh tracker from raw tabs', 'refreshEnrollmentTracker')
+    .addItem('Install raw-tab automation', 'installRawTabAutomation')
     .addItem('Rebuild dashboard counts', 'refreshDashboard')
     .addSeparator()
     .addItem('Run self-test with sample rows', 'runPhaseOneSelfTest')
@@ -234,6 +235,7 @@ function refreshEnrollmentTracker() {
   const ready = buildReadyForDarts_(master, prescreenClean, consentClean);
   writeTable_(ss.getSheetByName(SHEETS.READY), ready, 'EnrollmentID');
   refreshDashboard();
+  rememberRawTabSignatures_(ss);
 }
 
 
@@ -495,8 +497,9 @@ function buildProfessorSummary_(participants, prescreens, consents, ready, ss) {
     readyForDarts: ready.length,
     needsReview: participants.filter(p => p.eligibilityReviewStatus === 'Needs Review' || p.readyForDarts === 'Review').length
   };
-  return Object.assign(computed, readDashboardMetrics_(ss));
+  return computed;
 }
+
 function readDashboardMetrics_(ss) {
   const sheet = ss.getSheetByName(SHEETS.DASHBOARD);
   if (!sheet) return {};
@@ -817,6 +820,49 @@ function runPhaseOneSelfTest() {
 }
 
 // ---------- Helpers ----------
+
+function installRawTabAutomation() {
+  const ss = getSpreadsheet_();
+  ScriptApp.getProjectTriggers()
+    .filter(trigger => trigger.getHandlerFunction && trigger.getHandlerFunction() === 'handleWorkbookChange')
+    .forEach(trigger => ScriptApp.deleteTrigger(trigger));
+  ScriptApp.newTrigger('handleWorkbookChange').forSpreadsheet(ss).onChange().create();
+  rememberRawTabSignatures_(ss);
+  return getTrackerSummary();
+}
+
+function handleWorkbookChange(e) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(3000)) return;
+  try {
+    const ss = getSpreadsheet_();
+    if (rawTabsChanged_(ss)) refreshEnrollmentTracker();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function rawTabsChanged_(ss) {
+  const props = PropertiesService.getScriptProperties();
+  const current = rawTabSignatures_(ss);
+  const previous = props.getProperty('RAW_TAB_SIGNATURES') || '';
+  return current !== previous;
+}
+
+function rememberRawTabSignatures_(ss) {
+  PropertiesService.getScriptProperties().setProperty('RAW_TAB_SIGNATURES', rawTabSignatures_(ss));
+}
+
+function rawTabSignatures_(ss) {
+  return [SHEETS.PRESCREEN_RAW, SHEETS.CONSENT_RAW].map(sheetName => {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return `${sheetName}:missing`;
+    const rows = readRawRows_(sheet);
+    const ids = rows.map(row => String(row['Response ID'] || row['ResponseID'] || row['Timestamp (mm/dd/yyyy)'] || row['Timestamp'] || '')).join('|');
+    return `${sheetName}:${rows.length}:${ids}`;
+  }).join('||');
+}
+
 function getConfig_(ss) {
   const rows = ss.getSheetByName(SHEETS.CONFIG).getDataRange().getValues();
   const map = new Map(rows.slice(1).map(r => [String(r[0] || '').trim(), r[1]]));
