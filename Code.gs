@@ -1302,7 +1302,12 @@ function decodeQuestionProNeuroResponse_(value) {
 }
 
 function needsFollowup_(neuro, conditions, physicalSupports, config) {
-  return [neuro, conditions, physicalSupports].some(v => /\byes\b|autism|adhd|dyslexia|disability|iep|504|support|accommodation|diagnos/i.test(String(v || '')));
+  // Study workflow note: Phase 1 follow-up is for families who answered
+  // "No" to the neurodivergent/disability question so the team can ask for
+  // clarification about support needs, diagnoses, accommodations, or services.
+  // Families who answered "Yes" already gave the expected eligibility signal
+  // and should not be automatically placed in Followup_Queue.
+  return String(neuro || '').trim().toLowerCase() === 'no';
 }
 function detectConsentDecision_(raw) {
   const text = Object.values(raw).join(' ').toLowerCase();
@@ -1446,7 +1451,7 @@ function normalizeHeaderKey_(value) { return String(value || '').toLowerCase().r
 function enrollmentIdFor_(p) { return `ENR-${matchKey_(p) || normalizeToken_(p['ResponseID'])}`.toUpperCase(); }
 function matchKey_(r) { return [normalizeToken_(r['Child Full Name']), normalizeEmail_(r['Parent Email']) || normalizePhone_(r['Parent Phone'])].filter(Boolean).join('|'); }
 function isReady_(needed, status, consentStatus) { return consentStatus === 'Completed' && (needed !== 'Yes' || status === 'Completed') ? 'Yes' : 'No'; }
-function followupReason_(p) { return ['Neurodivergent/disability response', p['Conditions/Diagnoses'] && 'Conditions/diagnoses listed', p['Physical Disability Supports'] && 'Physical support needs'].filter(Boolean).join('; '); }
+function followupReason_(p) { return p['Neurodivergent Response'] === 'No' ? 'Neurodivergent/disability response was No; follow up for clarification about support needs or eligibility context' : ['Conditions/diagnoses listed', p['Physical Disability Supports'] && 'Physical support needs'].filter(Boolean).join('; '); }
 function cleanName_(v) { return String(v || '').trim().replace(/\s+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()); }
 function normalizeEmail_(v) { return String(v || '').trim().toLowerCase(); }
 function normalizePhone_(v) { const d = String(v || '').replace(/\D/g, ''); return d.length === 10 ? `${d.slice(0,3)}-${d.slice(3,6)}-${d.slice(6)}` : String(v || '').trim(); }
