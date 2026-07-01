@@ -5,8 +5,8 @@
  * QuestionPro webhook/manual raw import -> Prescreening_Raw/Consent_Raw audit tabs
  * -> normalized clean tabs -> Master_Enrollment -> Followup_Queue and Ready_For_DARTS.
  *
- * Phase 1 intentionally does not send email. The follow-up queue only identifies
- * who needs contact and lets the study team track drafted/sent/completed status.
+ * Email automation is supervised: Apps Script drafts and approves email jobs, while
+ * Power Automate + Outlook handles actual sending/reply callbacks once configured.
  */
 
 const SHEETS = Object.freeze({
@@ -29,7 +29,11 @@ const MANUAL_FOLLOWUP_FIELDS = [
   'Follow Up Status', 'Email Drafted', 'Email Sent Date',
   'Follow Up Completed Date', 'Assigned To', 'Notes',
   'Updated Support Details', 'Follow-Up Outcome', 'Eligibility Review Status',
-  'Reviewed By', 'Review Date', 'PI Notes'
+  'Reviewed By', 'Review Date', 'PI Notes',
+  'Email Workflow Status', 'Latest EmailJobID', 'Latest Email Type', 'Latest Email Subject',
+  'Latest Email Approved At', 'Latest Email Sent At', 'Latest Reply Received At',
+  'Reply Status', 'Reminder Status', 'Reminder Count', 'Next Reminder Date',
+  'Do Not Contact', 'Do Not Contact Reason'
 ];
 const FOLLOWUP_REVIEW_FIELDS = [
   'Updated Support Details', 'Follow-Up Outcome', 'Eligibility Review Status',
@@ -56,6 +60,49 @@ const UNMATCHED_CONSENT_HEADERS = [
   'Best Match Score', 'Match Reasons', 'Review Status', 'Notes'
 ];
 
+const EMAIL_TEMPLATES_SHEET = 'Email_Templates';
+const EMAIL_OUTBOX_SHEET = 'Email_Outbox';
+const EMAIL_LOG_SHEET = 'Email_Log';
+const REPLY_LOG_SHEET = 'Reply_Log';
+const REMINDER_QUEUE_SHEET = 'Reminder_Queue';
+const POWER_AUTOMATE_CONFIG_SHEET = 'Power_Automate_Config';
+const EMAIL_TEMPLATE_HEADERS = [
+  'TemplateID', 'Template Name', 'Email Type', 'Subject Template', 'Body Template',
+  'Active', 'Requires Approval', 'Approved By', 'Approved Date', 'Last Updated', 'Notes'
+];
+const EMAIL_OUTBOX_HEADERS = [
+  'EmailJobID', 'EnrollmentID', 'PrescreeningID', 'ConsentID', 'Child Full Name',
+  'Parent/Caretaker Name', 'Parent Email', 'Parent Phone', 'Cohort ID', 'Cohort Name',
+  'Site', 'Program Term', 'Email Type', 'TemplateID', 'Email Subject', 'Email Body',
+  'Email Body HTML', 'Approval Status', 'Approved By', 'Approved At', 'Send Status',
+  'Scheduled Send At', 'Sent At', 'Power Automate Run ID', 'Power Automate Status',
+  'Retry Count', 'Last Attempt At', 'Error Message', 'Created At', 'Updated At',
+  'Do Not Send', 'Notes'
+];
+const EMAIL_LOG_HEADERS = [
+  'LogID', 'Timestamp', 'EmailJobID', 'EnrollmentID', 'Parent Email', 'Child Full Name',
+  'Email Type', 'Subject', 'Action', 'Status', 'Sent By / Mailbox',
+  'Power Automate Run ID', 'Error Message', 'Raw Response'
+];
+const REPLY_LOG_HEADERS = [
+  'ReplyID', 'EmailJobID', 'EnrollmentID', 'Parent Email', 'From Name', 'From Address',
+  'Subject', 'Received At', 'Reply Preview', 'Reply Body', 'Has Attachments',
+  'Power Automate Message ID', 'Follow Up Status Before Reply', 'Follow Up Status After Reply',
+  'Reviewed By', 'Reviewed At', 'Notes'
+];
+const REMINDER_QUEUE_HEADERS = [
+  'ReminderID', 'EmailJobID', 'EnrollmentID', 'Reminder Number', 'Reminder Type',
+  'Scheduled Send At', 'Approval Status', 'Send Status', 'Sent At',
+  'Power Automate Run ID', 'Error Message', 'Created At', 'Notes'
+];
+const POWER_AUTOMATE_CONFIG_HEADERS = ['Setting', 'Value', 'Notes'];
+const EMAIL_FOLLOWUP_FIELDS = [
+  'Email Workflow Status', 'Latest EmailJobID', 'Latest Email Type', 'Latest Email Subject',
+  'Latest Email Approved At', 'Latest Email Sent At', 'Latest Reply Received At',
+  'Reply Status', 'Reminder Status', 'Reminder Count', 'Next Reminder Date',
+  'Do Not Contact', 'Do Not Contact Reason'
+];
+
 function getSpreadsheet_() {
   const active = SpreadsheetApp.getActiveSpreadsheet();
   if (active) {
@@ -80,6 +127,7 @@ function onOpen() {
     .addItem('Open professor dashboard', 'showProfessorDashboard')
     .addItem('Refresh tracker from raw tabs', 'refreshEnrollmentTracker')
     .addItem('Install raw-tab automation', 'installRawTabAutomation')
+    .addItem('Initialize email workflow sheets', 'initializeEmailWorkflow')
     .addItem('Rebuild dashboard counts', 'refreshDashboard')
     .addSeparator()
     .addItem('Run self-test with sample rows', 'runPhaseOneSelfTest')
@@ -171,6 +219,8 @@ function buildWebhookUrl_(formType, cohort) {
 
 /** Serves the deployed web app URL. This prevents "Script function not found: doGet". */
 function doGet(e) {
+  const action = String(e && e.parameter && e.parameter.action || '').toLowerCase();
+  if (action === 'email_jobs') return jsonResponse_({ok: true, jobs: getApprovedEmailJobsForPowerAutomate(e && e.parameter && e.parameter.secret)});
   const view = String(e && e.parameter && e.parameter.view || 'dashboard').toLowerCase();
   if (view === 'sidebar') {
     return HtmlService.createHtmlOutputFromFile('Sidebar')
@@ -200,6 +250,9 @@ function safeGetAppDashboardData_() {
 function doPost(e) {
   try {
     const payload = parseWebhookPayload_(e);
+    const action = String((e && e.parameter && e.parameter.action) || payload.action || '').toLowerCase();
+    if (action === 'email_status') return jsonResponse_(receivePowerAutomateSendUpdate_(payload));
+    if (action === 'email_reply') return jsonResponse_(receivePowerAutomateReply_(payload));
     const formType = getRequestedFormType_(e, payload) || detectFormType_(payload);
     const cohort = getRequestedCohort_(e, payload);
     appendRawPayload_(formType, payload, cohort);
@@ -220,6 +273,7 @@ function refreshEnrollmentTracker() {
   ensureMasterMatchColumns_(ss);
   ensureAuxiliaryMatchSheets_(ss);
   ensureCohortInfrastructure_(ss);
+  ensureEmailWorkflowInfrastructure_(ss);
 
   const prescreenRows = readRawRows_(ss.getSheetByName(SHEETS.PRESCREEN_RAW));
   const consentRows = readRawRows_(ss.getSheetByName(SHEETS.CONSENT_RAW));
@@ -274,6 +328,7 @@ function buildAppDashboardData_(shouldRefresh) {
   // QuestionPro/webhook processing and manual workbook refreshes update the Sheet database.
   // The dashboard only reads the current Sheet state so it cannot wipe or reset displayed data.
   const ss = getSpreadsheet_();
+  ensureEmailWorkflowInfrastructure_(ss);
   const professor = buildProfessorDashboardData_(false);
   const dashboardRows = readDashboardMetricRows_(ss);
   const matchReview = readObjectsOrEmpty_(ss, MATCH_REVIEW_SHEET);
@@ -283,6 +338,11 @@ function buildAppDashboardData_(shouldRefresh) {
   const master = readObjectsOrEmpty_(ss, SHEETS.MASTER);
   const followups = readObjectsOrEmpty_(ss, SHEETS.FOLLOWUP);
   const ready = readObjectsOrEmpty_(ss, SHEETS.READY);
+  const emailTemplates = readObjectsOrEmpty_(ss, EMAIL_TEMPLATES_SHEET);
+  const emailOutbox = readObjectsOrEmpty_(ss, EMAIL_OUTBOX_SHEET);
+  const emailLog = readObjectsOrEmpty_(ss, EMAIL_LOG_SHEET);
+  const replyLog = readObjectsOrEmpty_(ss, REPLY_LOG_SHEET);
+  const reminderQueue = readObjectsOrEmpty_(ss, REMINDER_QUEUE_SHEET);
   return {
     generatedAt: new Date().toISOString(),
     spreadsheetName: ss.getName(),
@@ -298,12 +358,18 @@ function buildAppDashboardData_(shouldRefresh) {
     consents,
     master,
     cohorts: buildCohortSummaries_(ss, professor.participants, prescreens, consents),
+    emailTemplates,
+    emailOutbox,
+    emailLog,
+    replyLog,
+    reminderQueue,
+    emailMetrics: buildEmailMetrics_(emailOutbox, emailLog, replyLog, reminderQueue),
     rawCounts: {
       prescreening: readRawRows_(ss.getSheetByName(SHEETS.PRESCREEN_RAW)).length,
       consent: readRawRows_(ss.getSheetByName(SHEETS.CONSENT_RAW)).length
     },
-    activity: buildActivityFeed_(prescreens, consents, followups, matchReview, unmatchedConsents),
-    reports: buildReportData_(professor.participants, followups, matchReview, unmatchedConsents, ready),
+    activity: buildActivityFeed_(prescreens, consents, followups, matchReview, unmatchedConsents, emailOutbox, replyLog),
+    reports: buildReportData_(professor.participants, followups, matchReview, unmatchedConsents, ready, emailOutbox, replyLog, reminderQueue),
     setup: getSheetSetupStatus_(),
     urls: {
       webApp: getWebAppUrl_(),
@@ -346,29 +412,38 @@ function buildCommandCenterMetrics_(summary, dashboardRows, matchReview, unmatch
   };
 }
 
-function buildActivityFeed_(prescreens, consents, followups, matchReview, unmatchedConsents) {
+function buildActivityFeed_(prescreens, consents, followups, matchReview, unmatchedConsents, emailOutbox, replyLog) {
   const items = [];
   prescreens.slice(-8).forEach(row => items.push({type: 'Prescreening', title: row['Child Full Name'] || 'Prescreening submitted', detail: row['Parent Email'] || row['Parent/Caretaker Name'] || '', when: row['Submitted At'] || ''}));
   consents.slice(-8).forEach(row => items.push({type: 'Consent', title: row['Child Full Name'] || 'Consent submitted', detail: row['Parent Email'] || row['Parent Full Name'] || '', when: row['Submitted At'] || ''}));
   followups.filter(row => row['Follow Up Status'] && row['Follow Up Status'] !== 'Not Started').slice(-8).forEach(row => items.push({type: 'Follow-Up', title: row['Child Full Name'] || row['EnrollmentID'], detail: row['Follow Up Status'], when: row['Follow Up Completed Date'] || row['Email Sent Date'] || ''}));
   matchReview.slice(-8).forEach(row => items.push({type: 'Match Review', title: row['Child Full Name'] || row['EnrollmentID'], detail: row['Match Status'] || 'Needs Review', when: row['Last Updated'] || ''}));
   unmatchedConsents.slice(-8).forEach(row => items.push({type: 'Unmatched Consent', title: row['Child Full Name'] || row['Consent ResponseID'], detail: row['Best Prescreening Match'] || 'No confident match', when: row['Submitted At'] || ''}));
+  (emailOutbox || []).slice(-8).forEach(row => items.push({type: 'Email', title: row['Child Full Name'] || row['EmailJobID'], detail: `${row['Email Type'] || 'Email'} • ${row['Send Status'] || row['Approval Status'] || ''}`, when: row['Updated At'] || row['Created At'] || ''}));
+  (replyLog || []).slice(-8).forEach(row => items.push({type: 'Reply', title: row['Child Full Name'] || row['EnrollmentID'], detail: row['Reply Preview'] || row['Subject'] || '', when: row['Received At'] || ''}));
   return items.sort((a, b) => String(b.when || '').localeCompare(String(a.when || ''))).slice(0, 15);
 }
 
-function buildReportData_(participants, followups, matchReview, unmatchedConsents, ready) {
+function buildReportData_(participants, followups, matchReview, unmatchedConsents, ready, emailOutbox, replyLog, reminderQueue) {
   return {
     followupStatus: groupCounts_(followups, 'Follow Up Status'),
     consentStatus: groupCounts_(participants, 'consentStatus'),
     readiness: groupCounts_(participants, 'readyForDarts'),
     matchStatus: groupCounts_(participants, 'matchStatus'),
     reviewStatus: groupCounts_(participants, 'eligibilityReviewStatus'),
+    emailSendStatus: groupCounts_(emailOutbox || [], 'Send Status'),
+    emailApprovalStatus: groupCounts_(emailOutbox || [], 'Approval Status'),
+    replyStatus: groupCounts_(replyLog || [], 'Follow Up Status After Reply'),
+    reminderStatus: groupCounts_(reminderQueue || [], 'Send Status'),
     actionItems: [
       {label: 'Follow-ups not started', value: followups.filter(row => !row['Follow Up Status'] || row['Follow Up Status'] === 'Not Started').length},
       {label: 'Follow-ups awaiting response', value: followups.filter(row => row['Follow Up Status'] === 'Awaiting Response').length},
       {label: 'Match review needed', value: matchReview.length},
       {label: 'Unmatched consent records', value: unmatchedConsents.length},
-      {label: 'Ready for DARTS export', value: ready.length}
+      {label: 'Ready for DARTS export', value: ready.length},
+      {label: 'Emails pending approval', value: (emailOutbox || []).filter(row => row['Approval Status'] === 'Pending Approval').length},
+      {label: 'Email send failures', value: (emailOutbox || []).filter(row => row['Send Status'] === 'Failed').length},
+      {label: 'Parent replies needing review', value: (replyLog || []).filter(row => !row['Reviewed At']).length}
     ]
   };
 }
@@ -561,7 +636,7 @@ function updateFollowupReview(updates) {
   const values = sheet.getDataRange().getValues();
   const targetRow = values.findIndex((row, index) => index > 0 && String(row[idCol - 1]) === String(updates.enrollmentId)) + 1;
   if (targetRow < 2) throw new Error(`EnrollmentID not found in Followup_Queue: ${updates.enrollmentId}`);
-  const allowed = ['Follow Up Status', 'Email Drafted', 'Email Sent Date', 'Follow Up Completed Date', 'Assigned To', 'Notes', ...FOLLOWUP_REVIEW_FIELDS];
+  const allowed = ['Follow Up Status', 'Email Drafted', 'Email Sent Date', 'Follow Up Completed Date', 'Assigned To', 'Notes', ...FOLLOWUP_REVIEW_FIELDS, ...EMAIL_FOLLOWUP_FIELDS];
   allowed.forEach(field => {
     if (updates[field] === undefined) return;
     const col = headers.indexOf(field) + 1;
@@ -575,7 +650,7 @@ function ensureFollowupReviewColumns_(ss) {
   const sheet = ss.getSheetByName(SHEETS.FOLLOWUP);
   if (!sheet) return;
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
-  FOLLOWUP_REVIEW_FIELDS.forEach(field => {
+  FOLLOWUP_REVIEW_FIELDS.concat(EMAIL_FOLLOWUP_FIELDS).forEach(field => {
     if (headers.includes(field)) return;
     sheet.getRange(1, sheet.getLastColumn() + 1).setValue(field);
     headers.push(field);
@@ -596,7 +671,11 @@ function refreshDashboard() {
     ['Ready for DARTS', countWhere_(ss, SHEETS.MASTER, 'Ready for DARTS', 'Yes')],
     ['Unmatched Consent Records', countRows_(ss, UNMATCHED_CONSENT_SHEET)],
     ['Possible Duplicate Records', countWhere_(ss, MATCH_REVIEW_SHEET, 'Review Status', 'Needs Review')],
-    ['Needs Review', countWhere_(ss, SHEETS.MASTER, 'Ready for DARTS', 'Review')]
+    ['Needs Review', countWhere_(ss, SHEETS.MASTER, 'Ready for DARTS', 'Review')],
+    ['Emails Pending Approval', countWhere_(ss, EMAIL_OUTBOX_SHEET, 'Approval Status', 'Pending Approval')],
+    ['Emails Ready To Send', countWhere_(ss, EMAIL_OUTBOX_SHEET, 'Send Status', 'Ready To Send')],
+    ['Emails Sent', countWhere_(ss, EMAIL_OUTBOX_SHEET, 'Send Status', 'Sent')],
+    ['Replies Received', countRows_(ss, REPLY_LOG_SHEET)]
   ];
   const headerRow = 2;
   const values = sh.getDataRange().getValues();
@@ -819,7 +898,20 @@ function buildFollowupQueue_(master, prescreens, manualFollowup, config) {
       'Eligibility Review Status': manual['Eligibility Review Status'] || '',
       'Reviewed By': manual['Reviewed By'] || '',
       'Review Date': manual['Review Date'] || '',
-      'PI Notes': manual['PI Notes'] || ''
+      'PI Notes': manual['PI Notes'] || '',
+      'Email Workflow Status': manual['Email Workflow Status'] || '',
+      'Latest EmailJobID': manual['Latest EmailJobID'] || '',
+      'Latest Email Type': manual['Latest Email Type'] || '',
+      'Latest Email Subject': manual['Latest Email Subject'] || '',
+      'Latest Email Approved At': manual['Latest Email Approved At'] || '',
+      'Latest Email Sent At': manual['Latest Email Sent At'] || '',
+      'Latest Reply Received At': manual['Latest Reply Received At'] || '',
+      'Reply Status': manual['Reply Status'] || 'No Reply',
+      'Reminder Status': manual['Reminder Status'] || '',
+      'Reminder Count': manual['Reminder Count'] || 0,
+      'Next Reminder Date': manual['Next Reminder Date'] || '',
+      'Do Not Contact': manual['Do Not Contact'] || 'No',
+      'Do Not Contact Reason': manual['Do Not Contact Reason'] || ''
     };
   });
 }
@@ -867,6 +959,460 @@ function runPhaseOneSelfTest() {
     'Email Address:': 'sample.parent@example.org'
   });
   refreshEnrollmentTracker();
+}
+
+
+// ---------- Email workflow / Power Automate handoff ----------
+
+function initializeEmailWorkflow() {
+  const ss = getSpreadsheet_();
+  ensureEmailWorkflowInfrastructure_(ss);
+  return buildAppDashboardData_(false);
+}
+
+function ensureEmailWorkflowInfrastructure_(ss) {
+  const templates = ensureSheetWithHeaders_(ss, EMAIL_TEMPLATES_SHEET, EMAIL_TEMPLATE_HEADERS);
+  ensureSheetWithHeaders_(ss, EMAIL_OUTBOX_SHEET, EMAIL_OUTBOX_HEADERS);
+  ensureSheetWithHeaders_(ss, EMAIL_LOG_SHEET, EMAIL_LOG_HEADERS);
+  ensureSheetWithHeaders_(ss, REPLY_LOG_SHEET, REPLY_LOG_HEADERS);
+  ensureSheetWithHeaders_(ss, REMINDER_QUEUE_SHEET, REMINDER_QUEUE_HEADERS);
+  ensureSheetWithHeaders_(ss, POWER_AUTOMATE_CONFIG_SHEET, POWER_AUTOMATE_CONFIG_HEADERS);
+  appendMissingHeaders_(ss.getSheetByName(SHEETS.FOLLOWUP), EMAIL_FOLLOWUP_FIELDS);
+  seedDefaultEmailTemplates_(templates);
+}
+
+function seedDefaultEmailTemplates_(sheet) {
+  const rows = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW);
+  if (rows.some(row => row['TemplateID'] === 'TPL-FOLLOWUP-INITIAL')) return;
+  sheet.appendRow([
+    'TPL-FOLLOWUP-INITIAL',
+    'Initial no-response clarification follow-up',
+    'Initial Follow-Up',
+    'Gaming4Good follow-up for {{child_first_name}}',
+    [
+      'Dear {{parent_first_name}},',
+      '',
+      'Thank you for completing the Gaming4Good prescreening form for {{child_first_name}}.',
+      '',
+      'We are following up because the prescreening response indicated that {{child_first_name}} may not currently identify as neurodivergent or have a formal disability/developmental condition/learning difference diagnosis. We would like to better understand whether there are any support needs, learning differences, school accommodations, services, or other information that may help the research team determine eligibility.',
+      '',
+      'If you are comfortable sharing, please reply with any additional details about current supports, diagnoses, accommodations, or learning needs that may not have been fully captured in the form.',
+      '',
+      'Thank you,',
+      'The Gaming4Good Research Team',
+      '',
+      'Reference: {{email_job_id}}'
+    ].join('\n'),
+    'Yes', 'Yes', '', '', new Date(), 'Default template created by Apps Script. Review and approve before production use.'
+  ]);
+}
+
+function getEmailTemplates_(ss) {
+  ensureEmailWorkflowInfrastructure_(ss);
+  return readObjects_(ss.getSheetByName(EMAIL_TEMPLATES_SHEET), CLEAN_HEADER_ROW, DATA_START_ROW)
+    .filter(row => String(row['Active'] || '').toLowerCase() !== 'no');
+}
+
+function previewFollowupEmail(request) {
+  const ss = getSpreadsheet_();
+  ensureEmailWorkflowInfrastructure_(ss);
+  const template = findEmailTemplate_(ss, request && request.templateId);
+  const context = buildEmailMergeContext_(ss, request && request.enrollmentId, request && request.emailJobId);
+  return buildEmailDraftPayload_(template, context);
+}
+
+function saveEmailDraft(request) {
+  const ss = getSpreadsheet_();
+  ensureEmailWorkflowInfrastructure_(ss);
+  const enrollmentId = String(request && request.enrollmentId || '').trim();
+  if (!enrollmentId) throw new Error('EnrollmentID is required to create an email draft.');
+  const template = findEmailTemplate_(ss, request && request.templateId);
+  const existingJobId = String(request && request.emailJobId || '').trim();
+  const emailJobId = existingJobId || nextId_('EMAIL');
+  const context = buildEmailMergeContext_(ss, enrollmentId, emailJobId);
+  const draft = buildEmailDraftPayload_(template, context);
+  const now = new Date();
+  const record = {
+    'EmailJobID': emailJobId,
+    'EnrollmentID': enrollmentId,
+    'PrescreeningID': context.prescreeningId,
+    'ConsentID': context.consentId,
+    'Child Full Name': context.childFullName,
+    'Parent/Caretaker Name': context.parentFullName,
+    'Parent Email': context.parentEmail,
+    'Parent Phone': context.parentPhone,
+    'Cohort ID': context.cohortId,
+    'Cohort Name': context.cohortName,
+    'Site': context.site,
+    'Program Term': context.programTerm,
+    'Email Type': request && request.emailType || template['Email Type'] || 'Initial Follow-Up',
+    'TemplateID': template['TemplateID'],
+    'Email Subject': request && request.subject || draft.subject,
+    'Email Body': request && request.body || draft.body,
+    'Email Body HTML': request && request.bodyHtml || draft.bodyHtml,
+    'Approval Status': 'Pending Approval',
+    'Approved By': '',
+    'Approved At': '',
+    'Send Status': 'Draft',
+    'Scheduled Send At': request && request.scheduledSendAt || '',
+    'Sent At': '',
+    'Power Automate Run ID': '',
+    'Power Automate Status': '',
+    'Retry Count': 0,
+    'Last Attempt At': '',
+    'Error Message': '',
+    'Created At': existingJobId ? '' : now,
+    'Updated At': now,
+    'Do Not Send': 'No',
+    'Notes': request && request.notes || ''
+  };
+  upsertByKey_(ss.getSheetByName(EMAIL_OUTBOX_SHEET), EMAIL_OUTBOX_HEADERS, 'EmailJobID', emailJobId, record);
+  appendEmailLog_(ss, record, 'Draft Created', 'Draft', '', '');
+  updateFollowupEmailFields_(ss, enrollmentId, {
+    'Email Workflow Status': 'Draft Created',
+    'Email Drafted': 'Yes',
+    'Latest EmailJobID': emailJobId,
+    'Latest Email Type': record['Email Type'],
+    'Latest Email Subject': record['Email Subject']
+  });
+  return buildAppDashboardData_(false);
+}
+
+function approveEmailForSending(request) {
+  const ss = getSpreadsheet_();
+  ensureEmailWorkflowInfrastructure_(ss);
+  const emailJobId = String(request && request.emailJobId || '').trim();
+  if (!emailJobId) throw new Error('EmailJobID is required for approval.');
+  const sheet = ss.getSheetByName(EMAIL_OUTBOX_SHEET);
+  const rowInfo = findRowByKey_(sheet, 'EmailJobID', emailJobId);
+  if (!rowInfo.rowNumber) throw new Error(`Email job not found: ${emailJobId}`);
+  const record = rowInfo.object;
+  if (record['Do Not Send'] === 'Yes') throw new Error('This email job is marked Do Not Send.');
+  if (!record['Parent Email']) throw new Error('Parent Email is required before approval.');
+  const scheduled = String(request && request.scheduledSendAt || record['Scheduled Send At'] || '').trim();
+  const now = new Date();
+  const updates = {
+    'Approval Status': 'Approved',
+    'Approved By': request && request.approvedBy || Session.getActiveUser().getEmail() || 'Dashboard Admin',
+    'Approved At': now,
+    'Send Status': scheduled ? 'Scheduled' : 'Ready To Send',
+    'Scheduled Send At': scheduled,
+    'Updated At': now,
+    'Notes': request && request.notes !== undefined ? request.notes : record['Notes']
+  };
+  updateRowByHeader_(sheet, rowInfo.rowNumber, updates);
+  appendEmailLog_(ss, Object.assign({}, record, updates), 'Approved', updates['Send Status'], '', '');
+  updateFollowupEmailFields_(ss, record['EnrollmentID'], {
+    'Email Workflow Status': updates['Send Status'],
+    'Latest Email Approved At': now,
+    'Latest EmailJobID': emailJobId,
+    'Latest Email Type': record['Email Type'],
+    'Latest Email Subject': record['Email Subject']
+  });
+  return buildAppDashboardData_(false);
+}
+
+function cancelEmailJob(request) {
+  const ss = getSpreadsheet_();
+  ensureEmailWorkflowInfrastructure_(ss);
+  const emailJobId = String(request && request.emailJobId || '').trim();
+  const sheet = ss.getSheetByName(EMAIL_OUTBOX_SHEET);
+  const rowInfo = findRowByKey_(sheet, 'EmailJobID', emailJobId);
+  if (!rowInfo.rowNumber) throw new Error(`Email job not found: ${emailJobId}`);
+  const updates = {'Send Status': 'Cancelled', 'Do Not Send': 'Yes', 'Updated At': new Date(), 'Notes': request && request.reason || rowInfo.object['Notes'] || ''};
+  updateRowByHeader_(sheet, rowInfo.rowNumber, updates);
+  appendEmailLog_(ss, Object.assign({}, rowInfo.object, updates), 'Cancelled', 'Cancelled', '', '');
+  updateFollowupEmailFields_(ss, rowInfo.object['EnrollmentID'], {'Email Workflow Status': 'Cancelled'});
+  return buildAppDashboardData_(false);
+}
+
+function markDoNotContact(request) {
+  const ss = getSpreadsheet_();
+  ensureEmailWorkflowInfrastructure_(ss);
+  const enrollmentId = String(request && request.enrollmentId || '').trim();
+  if (!enrollmentId) throw new Error('EnrollmentID is required.');
+  updateFollowupEmailFields_(ss, enrollmentId, {'Do Not Contact': 'Yes', 'Do Not Contact Reason': request && request.reason || '', 'Email Workflow Status': 'Do Not Contact'});
+  return buildAppDashboardData_(false);
+}
+
+function getApprovedEmailJobsForPowerAutomate(secret) {
+  const ss = getSpreadsheet_();
+  validatePowerAutomateSecret_(secret);
+  ensureEmailWorkflowInfrastructure_(ss);
+  const now = new Date();
+  return readObjects_(ss.getSheetByName(EMAIL_OUTBOX_SHEET), CLEAN_HEADER_ROW, DATA_START_ROW)
+    .filter(row => row['Approval Status'] === 'Approved')
+    .filter(row => ['Ready To Send', 'Scheduled', 'Failed'].includes(String(row['Send Status'] || '')))
+    .filter(row => row['Do Not Send'] !== 'Yes' && row['Sent At'] === '')
+    .filter(row => !row['Scheduled Send At'] || new Date(row['Scheduled Send At']) <= now);
+}
+
+function receivePowerAutomateSendUpdate_(payload) {
+  const ss = getSpreadsheet_();
+  validatePowerAutomateSecret_(payload && (payload.secret || payload.callbackSecret));
+  ensureEmailWorkflowInfrastructure_(ss);
+  const emailJobId = String(payload.emailJobId || payload.EmailJobID || '').trim();
+  if (!emailJobId) throw new Error('Power Automate callback missing emailJobId.');
+  const sheet = ss.getSheetByName(EMAIL_OUTBOX_SHEET);
+  const rowInfo = findRowByKey_(sheet, 'EmailJobID', emailJobId);
+  if (!rowInfo.rowNumber) throw new Error(`Email job not found: ${emailJobId}`);
+  const status = String(payload.status || payload.sendStatus || 'Sent');
+  const sent = /sent|success/i.test(status);
+  const updates = {
+    'Send Status': sent ? 'Sent' : 'Failed',
+    'Sent At': sent ? (payload.sentAt || new Date()) : rowInfo.object['Sent At'],
+    'Power Automate Run ID': payload.runId || payload.powerAutomateRunId || rowInfo.object['Power Automate Run ID'] || '',
+    'Power Automate Status': status,
+    'Retry Count': Number(rowInfo.object['Retry Count'] || 0) + (sent ? 0 : 1),
+    'Last Attempt At': payload.attemptedAt || new Date(),
+    'Error Message': payload.error || payload.errorMessage || '',
+    'Updated At': new Date()
+  };
+  updateRowByHeader_(sheet, rowInfo.rowNumber, updates);
+  appendEmailLog_(ss, Object.assign({}, rowInfo.object, updates), sent ? 'Sent' : 'Failed', updates['Send Status'], updates['Power Automate Run ID'], JSON.stringify(payload));
+  updateFollowupEmailFields_(ss, rowInfo.object['EnrollmentID'], {
+    'Email Workflow Status': sent ? 'Awaiting Response' : 'Send Failed',
+    'Follow Up Status': sent ? 'Awaiting Response' : rowInfo.object['Follow Up Status'],
+    'Email Sent Date': sent ? updates['Sent At'] : '',
+    'Latest Email Sent At': sent ? updates['Sent At'] : '',
+    'Latest EmailJobID': emailJobId
+  });
+  return {ok: true, emailJobId, status: updates['Send Status']};
+}
+
+function receivePowerAutomateReply_(payload) {
+  const ss = getSpreadsheet_();
+  validatePowerAutomateSecret_(payload && (payload.secret || payload.callbackSecret));
+  ensureEmailWorkflowInfrastructure_(ss);
+  const emailJobId = String(payload.emailJobId || payload.EmailJobID || '').trim();
+  const enrollmentId = String(payload.enrollmentId || payload.EnrollmentID || '').trim() || enrollmentIdForEmailJob_(ss, emailJobId);
+  const followupBefore = getFollowupStatus_(ss, enrollmentId);
+  const reply = {
+    'ReplyID': payload.replyId || nextId_('REPLY'),
+    'EmailJobID': emailJobId,
+    'EnrollmentID': enrollmentId,
+    'Parent Email': payload.parentEmail || payload.fromAddress || payload.from || '',
+    'From Name': payload.fromName || '',
+    'From Address': payload.fromAddress || payload.from || '',
+    'Subject': payload.subject || '',
+    'Received At': payload.receivedAt || new Date(),
+    'Reply Preview': payload.bodyPreview || String(payload.bodyText || payload.body || '').slice(0, 300),
+    'Reply Body': payload.bodyText || payload.body || '',
+    'Has Attachments': payload.hasAttachments || '',
+    'Power Automate Message ID': payload.messageId || '',
+    'Follow Up Status Before Reply': followupBefore,
+    'Follow Up Status After Reply': 'Parent Replied',
+    'Reviewed By': '',
+    'Reviewed At': '',
+    'Notes': payload.notes || ''
+  };
+  appendObjectByHeaders_(ss.getSheetByName(REPLY_LOG_SHEET), REPLY_LOG_HEADERS, reply);
+  appendEmailLog_(ss, {'EmailJobID': emailJobId, 'EnrollmentID': enrollmentId, 'Parent Email': reply['Parent Email'], 'Child Full Name': '', 'Email Type': 'Reply', 'Email Subject': reply['Subject']}, 'Reply Received', 'Parent Replied', payload.runId || '', JSON.stringify(payload));
+  updateFollowupEmailFields_(ss, enrollmentId, {'Follow Up Status': 'Parent Replied', 'Email Workflow Status': 'Parent Replied', 'Latest Reply Received At': reply['Received At'], 'Reply Status': 'Reply Received'});
+  return {ok: true, emailJobId, enrollmentId, status: 'Parent Replied'};
+}
+
+function scheduleReminder(request) {
+  const ss = getSpreadsheet_();
+  ensureEmailWorkflowInfrastructure_(ss);
+  const reminderId = nextId_('REMINDER');
+  const record = {
+    'ReminderID': reminderId,
+    'EmailJobID': request.emailJobId || '',
+    'EnrollmentID': request.enrollmentId || '',
+    'Reminder Number': request.reminderNumber || 1,
+    'Reminder Type': request.reminderType || 'Follow-Up Reminder',
+    'Scheduled Send At': request.scheduledSendAt || '',
+    'Approval Status': 'Pending Approval',
+    'Send Status': 'Draft',
+    'Sent At': '',
+    'Power Automate Run ID': '',
+    'Error Message': '',
+    'Created At': new Date(),
+    'Notes': request.notes || ''
+  };
+  appendObjectByHeaders_(ss.getSheetByName(REMINDER_QUEUE_SHEET), REMINDER_QUEUE_HEADERS, record);
+  updateFollowupEmailFields_(ss, record['EnrollmentID'], {'Reminder Status': 'Reminder Drafted', 'Next Reminder Date': record['Scheduled Send At']});
+  return buildAppDashboardData_(false);
+}
+
+function buildEmailMetrics_(outbox, logs, replies, reminders) {
+  outbox = outbox || [];
+  replies = replies || [];
+  reminders = reminders || [];
+  return {
+    drafts: outbox.filter(row => row['Send Status'] === 'Draft').length,
+    pendingApproval: outbox.filter(row => row['Approval Status'] === 'Pending Approval').length,
+    readyToSend: outbox.filter(row => row['Send Status'] === 'Ready To Send').length,
+    scheduled: outbox.filter(row => row['Send Status'] === 'Scheduled').length,
+    sent: outbox.filter(row => row['Send Status'] === 'Sent').length,
+    failed: outbox.filter(row => row['Send Status'] === 'Failed').length,
+    repliesReceived: replies.length,
+    remindersPending: reminders.filter(row => row['Send Status'] !== 'Sent').length
+  };
+}
+
+function findEmailTemplate_(ss, templateId) {
+  const templates = getEmailTemplates_(ss);
+  return templates.find(row => row['TemplateID'] === templateId) || templates[0] || {};
+}
+
+function buildEmailMergeContext_(ss, enrollmentId, emailJobId) {
+  const participants = buildProfessorDashboardData_(false).participants || [];
+  const participant = participants.find(p => p.enrollmentId === enrollmentId);
+  if (!participant) throw new Error(`EnrollmentID not found: ${enrollmentId}`);
+  const nameParts = String(participant.parentName || '').trim().split(/\s+/).filter(Boolean);
+  const childParts = String(participant.childName || '').trim().split(/\s+/).filter(Boolean);
+  return {
+    emailJobId: emailJobId || nextId_('EMAIL-PREVIEW'),
+    enrollmentId: participant.enrollmentId,
+    prescreeningId: '',
+    consentId: '',
+    childFullName: participant.childName || '',
+    childFirstName: childParts[0] || participant.childName || '',
+    parentFullName: participant.parentName || '',
+    parentFirstName: nameParts[0] || participant.parentName || 'there',
+    parentEmail: participant.parentEmail || '',
+    parentPhone: participant.parentPhone || '',
+    cohortId: participant.cohortId || '',
+    cohortName: participant.cohortName || '',
+    site: participant.site || '',
+    programTerm: participant.programTerm || '',
+    followupReason: participant.followUpStatus || '',
+    supportDetails: participant.supportDetails || ''
+  };
+}
+
+function buildEmailDraftPayload_(template, context) {
+  const subject = mergeTemplate_(template['Subject Template'] || 'Gaming4Good follow-up for {{child_first_name}}', context);
+  const body = mergeTemplate_(template['Body Template'] || '', context);
+  return {templateId: template['TemplateID'] || '', emailType: template['Email Type'] || '', subject, body, bodyHtml: textToHtml_(body), context};
+}
+
+function mergeTemplate_(template, context) {
+  const fields = {
+    email_job_id: context.emailJobId,
+    enrollment_id: context.enrollmentId,
+    parent_first_name: context.parentFirstName,
+    parent_full_name: context.parentFullName,
+    parent_email: context.parentEmail,
+    child_first_name: context.childFirstName,
+    child_full_name: context.childFullName,
+    cohort_id: context.cohortId,
+    cohort_name: context.cohortName,
+    site: context.site,
+    program_term: context.programTerm,
+    followup_reason: context.followupReason,
+    support_details: context.supportDetails
+  };
+  return String(template || '').replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_, key) => fields[String(key).toLowerCase()] || '');
+}
+
+function textToHtml_(text) {
+  return String(text || '').split(/\n{2,}/).map(p => `<p>${String(p).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')}</p>`).join('');
+}
+
+function updateFollowupEmailFields_(ss, enrollmentId, updates) {
+  const sheet = ss.getSheetByName(SHEETS.FOLLOWUP);
+  if (!sheet || !enrollmentId) return;
+  appendMissingHeaders_(sheet, Object.keys(updates));
+  const rowInfo = findRowByKey_(sheet, 'EnrollmentID', enrollmentId);
+  if (rowInfo.rowNumber) updateRowByHeader_(sheet, rowInfo.rowNumber, updates);
+  if (updates['Follow Up Status'] !== undefined) {
+    const masterSheet = ss.getSheetByName(SHEETS.MASTER);
+    const masterRow = findRowByKey_(masterSheet, 'EnrollmentID', enrollmentId);
+    if (masterRow.rowNumber) updateRowByHeader_(masterSheet, masterRow.rowNumber, {'Follow Up Status': updates['Follow Up Status']});
+  }
+}
+
+function getFollowupStatus_(ss, enrollmentId) {
+  const rowInfo = findRowByKey_(ss.getSheetByName(SHEETS.FOLLOWUP), 'EnrollmentID', enrollmentId);
+  return rowInfo.object && rowInfo.object['Follow Up Status'] || '';
+}
+
+function enrollmentIdForEmailJob_(ss, emailJobId) {
+  const rowInfo = findRowByKey_(ss.getSheetByName(EMAIL_OUTBOX_SHEET), 'EmailJobID', emailJobId);
+  return rowInfo.object && rowInfo.object['EnrollmentID'] || '';
+}
+
+function appendEmailLog_(ss, emailRecord, action, status, runId, rawResponse) {
+  appendObjectByHeaders_(ss.getSheetByName(EMAIL_LOG_SHEET), EMAIL_LOG_HEADERS, {
+    'LogID': nextId_('LOG'),
+    'Timestamp': new Date(),
+    'EmailJobID': emailRecord['EmailJobID'] || '',
+    'EnrollmentID': emailRecord['EnrollmentID'] || '',
+    'Parent Email': emailRecord['Parent Email'] || '',
+    'Child Full Name': emailRecord['Child Full Name'] || '',
+    'Email Type': emailRecord['Email Type'] || '',
+    'Subject': emailRecord['Email Subject'] || emailRecord['Subject'] || '',
+    'Action': action,
+    'Status': status,
+    'Sent By / Mailbox': '',
+    'Power Automate Run ID': runId || '',
+    'Error Message': emailRecord['Error Message'] || '',
+    'Raw Response': rawResponse || ''
+  });
+}
+
+function validatePowerAutomateSecret_(provided) {
+  const expected = PropertiesService.getScriptProperties().getProperty('POWER_AUTOMATE_SECRET') || getPowerAutomateConfigValue_('PowerAutomateCallbackSecret');
+  if (!expected) return true;
+  if (String(provided || '') !== String(expected)) throw new Error('Invalid Power Automate callback secret.');
+  return true;
+}
+
+function getPowerAutomateConfigValue_(setting) {
+  const ss = getSpreadsheet_();
+  const sheet = ss.getSheetByName(POWER_AUTOMATE_CONFIG_SHEET);
+  if (!sheet) return '';
+  const row = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW).find(r => r['Setting'] === setting);
+  return row ? row['Value'] : '';
+}
+
+function nextId_(prefix) {
+  return `${prefix}-${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss')}-${Math.floor(Math.random() * 10000)}`;
+}
+
+function findRowByKey_(sheet, keyField, keyValue) {
+  if (!sheet || !keyValue) return {rowNumber: 0, object: {}};
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(String);
+  const keyCol = headers.indexOf(keyField);
+  if (keyCol < 0) return {rowNumber: 0, object: {}};
+  for (let i = 1; i < values.length; i++) {
+    if (String(values[i][keyCol]) === String(keyValue)) {
+      const object = {};
+      headers.forEach((h, idx) => { if (h) object[h] = values[i][idx]; });
+      return {rowNumber: i + 1, object};
+    }
+  }
+  return {rowNumber: 0, object: {}};
+}
+
+function updateRowByHeader_(sheet, rowNumber, updates) {
+  appendMissingHeaders_(sheet, Object.keys(updates));
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  Object.entries(updates).forEach(([field, value]) => {
+    const col = headers.indexOf(field) + 1;
+    if (col > 0) sheet.getRange(rowNumber, col).setValue(value);
+  });
+}
+
+function upsertByKey_(sheet, headers, keyField, keyValue, record) {
+  appendMissingHeaders_(sheet, headers);
+  const rowInfo = findRowByKey_(sheet, keyField, keyValue);
+  if (rowInfo.rowNumber) {
+    if (!record['Created At']) delete record['Created At'];
+    updateRowByHeader_(sheet, rowInfo.rowNumber, record);
+  } else {
+    appendObjectByHeaders_(sheet, headers, record);
+  }
+}
+
+function appendObjectByHeaders_(sheet, headers, record) {
+  appendMissingHeaders_(sheet, headers);
+  const currentHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  sheet.appendRow(currentHeaders.map(header => record[header] === undefined ? '' : record[header]));
 }
 
 // ---------- Helpers ----------

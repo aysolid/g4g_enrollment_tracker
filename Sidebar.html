@@ -50,7 +50,7 @@
       <li>Open the Google Sheet, then run <strong>G4G Tracker → Refresh tracker from raw tabs</strong> once.</li>
       <li>Confirm the raw tabs have the QuestionPro header row in row 2 and response data starting in row 3.</li>
       <li>Import one prescreening export row into <code>Prescreening_Raw</code>, refresh, and confirm it appears in <code>Prescreening_Clean</code> and <code>Master_Enrollment</code>.</li>
-      <li>If the row says the child is neurodivergent or needs supports, confirm it appears in <code>Followup_Queue</code>.</li>
+      <li>If the row says the child is <strong>not</strong> neurodivergent/support-identified, confirm it appears in <code>Followup_Queue</code> for clarification follow-up.</li>
       <li>Import one matching consent export row into <code>Consent_Raw</code>, refresh, and confirm consent status updates in <code>Master_Enrollment</code>.</li>
     </ol>
   </div>
@@ -79,7 +79,7 @@
       <li>Keep raw tabs as the audit trail.</li>
       <li>Work follow-ups from <code>Followup_Queue</code>.</li>
       <li>Manually update follow-up status/date/assignee/notes in the queue.</li>
-      <li>Do not use this tool to send email yet.</li>
+      <li>Use the web dashboard Email Center to draft/approve email jobs; Power Automate + Outlook will send only approved outbox rows once configured.</li>
     </ul>
   </div>
 
