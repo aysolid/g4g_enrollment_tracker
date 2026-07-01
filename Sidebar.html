@@ -62,8 +62,11 @@
     <input id="prescreeningWebhookUrl" readonly value="Loading URL…" onclick="this.select()">
     <label>Consent webhook URL</label>
     <input id="consentWebhookUrl" readonly value="Loading URL…" onclick="this.select()">
+    <label>Example cohort prescreening URL</label>
+    <input id="cohortWebhookUrl" readonly value="Loading URL…" onclick="this.select()">
     <ul>
       <li>Prescreening form webhook → URL ending in <code>?form=prescreening</code> → response should land in <code>Prescreening_Raw</code>.</li>
+      <li>For cohort-specific prescreeners, add query values such as <code>&cohort_id=COHORT-01&cohort_name=Cohort%201&site=UGA&program_term=Summer%202026</code>. These values flow into clean, master, follow-up, ready, and dashboard views.</li>
       <li>Consent form webhook → URL ending in <code>?form=consent</code> → response should land in <code>Consent_Raw</code>.</li>
       <li>If QuestionPro asks for content type, choose <code>application/json</code>.</li>
       <li>After saving each webhook, submit a test response and click <strong>Refresh tracker</strong>.</li>
@@ -114,6 +117,8 @@
       document.getElementById('summaryCard').style.display = 'block';
       document.getElementById('prescreeningWebhookUrl').value = summary.prescreeningWebhookUrl || ((summary.webAppUrl || window.location.href) + '?form=prescreening');
       document.getElementById('consentWebhookUrl').value = summary.consentWebhookUrl || ((summary.webAppUrl || window.location.href) + '?form=consent');
+      const prescreenUrl = summary.prescreeningWebhookUrl || ((summary.webAppUrl || window.location.href) + '?form=prescreening');
+      document.getElementById('cohortWebhookUrl').value = prescreenUrl + '&cohort_id=COHORT-01&cohort_name=Cohort%201&site=UGA&program_term=Summer%202026';
       renderSetup(summary.setup);
       setBusy(false, 'Last updated: ' + new Date(summary.generatedAt).toLocaleString());
     }

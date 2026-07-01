@@ -37,6 +37,9 @@ const FOLLOWUP_REVIEW_FIELDS = [
 ];
 const MATCH_REVIEW_SHEET = 'Match_Review';
 const UNMATCHED_CONSENT_SHEET = 'Unmatched_Consent';
+const COHORTS_SHEET = 'Cohorts';
+const COHORT_FIELDS = ['Cohort ID', 'Cohort Name', 'Site', 'Program Term'];
+const COHORT_HEADERS = ['Cohort ID', 'Cohort Name', 'Site', 'Program Term', 'Status', 'Prescreening Webhook URL', 'Notes', 'Last Seen'];
 const MASTER_MATCH_FIELDS = [
   'Match Status', 'Match Confidence Score', 'Match Reasons', 'Needs Match Review',
   'Possible Consent Matches', 'Manual Consent ResponseID', 'Manual Match Notes'
@@ -155,9 +158,15 @@ function getWebAppUrl_() {
   }
 }
 
-function buildWebhookUrl_(formType) {
+function buildWebhookUrl_(formType, cohort) {
   const url = getWebAppUrl_();
-  return url ? `${url}?form=${encodeURIComponent(formType)}` : '';
+  if (!url) return '';
+  const params = [`form=${encodeURIComponent(formType)}`];
+  if (cohort && cohort.cohortId) params.push(`cohort_id=${encodeURIComponent(cohort.cohortId)}`);
+  if (cohort && cohort.cohortName) params.push(`cohort_name=${encodeURIComponent(cohort.cohortName)}`);
+  if (cohort && cohort.site) params.push(`site=${encodeURIComponent(cohort.site)}`);
+  if (cohort && cohort.programTerm) params.push(`program_term=${encodeURIComponent(cohort.programTerm)}`);
+  return `${url}?${params.join('&')}`;
 }
 
 /** Serves the deployed web app URL. This prevents "Script function not found: doGet". */
@@ -192,7 +201,9 @@ function doPost(e) {
   try {
     const payload = parseWebhookPayload_(e);
     const formType = getRequestedFormType_(e, payload) || detectFormType_(payload);
-    appendRawPayload_(formType, payload);
+    const cohort = getRequestedCohort_(e, payload);
+    appendRawPayload_(formType, payload, cohort);
+    upsertCohortFromWebhook_(cohort);
     refreshEnrollmentTracker();
     return jsonResponse_({ok: true, formType, message: `Webhook captured in ${formType} raw tab`});
   } catch (err) {
@@ -208,12 +219,14 @@ function refreshEnrollmentTracker() {
   ensureFollowupReviewColumns_(ss);
   ensureMasterMatchColumns_(ss);
   ensureAuxiliaryMatchSheets_(ss);
+  ensureCohortInfrastructure_(ss);
 
   const prescreenRows = readRawRows_(ss.getSheetByName(SHEETS.PRESCREEN_RAW));
   const consentRows = readRawRows_(ss.getSheetByName(SHEETS.CONSENT_RAW));
 
   const prescreenClean = prescreenRows.map((row, i) => normalizePrescreening_(row, i + 1, config));
   const consentClean = consentRows.map((row, i) => normalizeConsent_(row, i + 1, config));
+  ensureCoreOutputHeaders_(ss);
 
   writeTable_(ss.getSheetByName(SHEETS.PRESCREEN_CLEAN), prescreenClean, 'ResponseID');
   writeTable_(ss.getSheetByName(SHEETS.CONSENT_CLEAN), consentClean, 'ResponseID');
@@ -284,6 +297,7 @@ function buildAppDashboardData_(shouldRefresh) {
     prescreens,
     consents,
     master,
+    cohorts: buildCohortSummaries_(ss, professor.participants, prescreens, consents),
     rawCounts: {
       prescreening: readRawRows_(ss.getSheetByName(SHEETS.PRESCREEN_RAW)).length,
       consent: readRawRows_(ss.getSheetByName(SHEETS.CONSENT_RAW)).length
@@ -414,6 +428,10 @@ function buildProfessorDashboardData_(shouldRefresh) {
       parentName: row['Parent/Caretaker Name'] || '',
       parentEmail: row['Parent Email'] || '',
       parentPhone: row['Parent Phone'] || '',
+      cohortId: row['Cohort ID'] || prescreen['Cohort ID'] || consent['Cohort ID'] || '',
+      cohortName: row['Cohort Name'] || prescreen['Cohort Name'] || consent['Cohort Name'] || '',
+      site: row['Site'] || prescreen['Site'] || consent['Site'] || '',
+      programTerm: row['Program Term'] || prescreen['Program Term'] || consent['Program Term'] || '',
       grade: prescreen['Child Grade'] || consent['Grade'] || '',
       prescreeningStatus: row['Prescreening Status'] || '',
       consentStatus: row['Consent Status'] || '',
@@ -464,6 +482,10 @@ function masterLikeFromPrescreen_(prescreen) {
     'Parent/Caretaker Name': prescreen['Parent/Caretaker Name'] || '',
     'Parent Email': prescreen['Parent Email'] || '',
     'Parent Phone': prescreen['Parent Phone'] || '',
+    'Cohort ID': prescreen['Cohort ID'] || '',
+    'Cohort Name': prescreen['Cohort Name'] || '',
+    'Site': prescreen['Site'] || '',
+    'Program Term': prescreen['Program Term'] || '',
     'Prescreening Status': prescreen['Response Status'] || 'Completed',
     'Consent Status': 'Pending',
     'Neurodivergent Response': prescreen['Neurodivergent Response'] || '',
@@ -604,6 +626,10 @@ function normalizePrescreening_(raw, index, config) {
     'ResponseID': responseId,
     'Submitted At': getFirst_(raw, ['Timestamp (mm/dd/yyyy)', 'Timestamp']),
     'Response Status': getFirst_(raw, ['Response Status']) || 'Completed',
+    'Cohort ID': getFirst_(raw, ['Cohort ID', 'cohort_id', 'cohortId']),
+    'Cohort Name': getFirst_(raw, ['Cohort Name', 'cohort_name', 'cohortName']),
+    'Site': getFirst_(raw, ['Site', 'site']),
+    'Program Term': getFirst_(raw, ['Program Term', 'program_term', 'term']),
     'Child Full Name': cleanName_(getByContains_(raw, ['Childs Name', "Child's Name", 'Child Full Name'])),
     'Child Age': getByContains_(raw, ['Childs Age', "Child's Age"]),
     'Child Gender': getByContains_(raw, ['Childs Gender', "Child's Gender"]),
@@ -638,6 +664,10 @@ function normalizeConsent_(raw, index, config) {
     'ResponseID': responseId,
     'Submitted At': getFirst_(raw, ['Timestamp (mm/dd/yyyy)', 'Timestamp']),
     'Response Status': getFirst_(raw, ['Response Status']) || 'Completed',
+    'Cohort ID': getFirst_(raw, ['Cohort ID', 'cohort_id', 'cohortId']),
+    'Cohort Name': getFirst_(raw, ['Cohort Name', 'cohort_name', 'cohortName']),
+    'Site': getFirst_(raw, ['Site', 'site']),
+    'Program Term': getFirst_(raw, ['Program Term', 'program_term', 'term']),
     'Consent Decision': decision,
     'Parent First Name': cleanName_(parentFirst),
     'Parent Last Name': cleanName_(parentLast),
@@ -680,6 +710,10 @@ function buildMasterEnrollment_(prescreens, consents, manualFollowup, config, ma
       'Parent/Caretaker Name': p['Parent/Caretaker Name'],
       'Parent Email': p['Parent Email'] || (consent && consent['Parent Email']) || '',
       'Parent Phone': p['Parent Phone'] || (consent && consent['Parent Phone']) || '',
+      'Cohort ID': p['Cohort ID'] || (consent && consent['Cohort ID']) || '',
+      'Cohort Name': p['Cohort Name'] || (consent && consent['Cohort Name']) || '',
+      'Site': p['Site'] || (consent && consent['Site']) || '',
+      'Program Term': p['Program Term'] || (consent && consent['Program Term']) || '',
       'Prescreening Status': p['Response Status'] || 'Completed',
       'Consent Status': consentStatus,
       'Neurodivergent Response': p['Neurodivergent Response'],
@@ -711,6 +745,10 @@ function buildMatchReview_(master) {
     'Parent/Caretaker Name': m['Parent/Caretaker Name'],
     'Parent Email': m['Parent Email'],
     'Parent Phone': m['Parent Phone'],
+    'Cohort ID': m['Cohort ID'],
+    'Cohort Name': m['Cohort Name'],
+    'Site': m['Site'],
+    'Program Term': m['Program Term'],
     'Match Status': m['Match Status'],
     'Match Confidence Score': m['Match Confidence Score'],
     'Match Reasons': m['Match Reasons'],
@@ -736,6 +774,10 @@ function buildUnmatchedConsent_(prescreens, consents, master) {
       'Parent Full Name': c['Parent Full Name'],
       'Parent Email': c['Parent Email'],
       'Parent Phone': c['Parent Phone'],
+      'Cohort ID': c['Cohort ID'],
+      'Cohort Name': c['Cohort Name'],
+      'Site': c['Site'],
+      'Program Term': c['Program Term'],
       'Consent Status': c['Consent Status'],
       'Best Prescreening Match': best ? `${best.prescreen['Child Full Name'] || '(missing child)'} / ${best.prescreen['Parent Email'] || best.prescreen['Parent Phone'] || '(no contact)'} / ${best.prescreen['ResponseID']}` : '',
       'Best Match Score': best ? best.match.score : 0,
@@ -757,6 +799,10 @@ function buildFollowupQueue_(master, prescreens, manualFollowup, config) {
       'Parent/Caretaker Name': m['Parent/Caretaker Name'],
       'Parent Email': m['Parent Email'],
       'Parent Phone': m['Parent Phone'],
+      'Cohort ID': m['Cohort ID'],
+      'Cohort Name': m['Cohort Name'],
+      'Site': m['Site'],
+      'Program Term': m['Program Term'],
       'Neurodivergent Response': m['Neurodivergent Response'],
       'Conditions/Diagnoses': p['Conditions/Diagnoses'],
       'Support Details': p['Diagnostic/Support Details'],
@@ -790,6 +836,10 @@ function buildReadyForDarts_(master, prescreens, consents) {
       'Parent Name': m['Parent/Caretaker Name'],
       'Parent Email': m['Parent Email'],
       'Parent Phone': m['Parent Phone'],
+      'Cohort ID': m['Cohort ID'],
+      'Cohort Name': m['Cohort Name'],
+      'Site': m['Site'],
+      'Program Term': m['Program Term'],
       'Grade': p['Child Grade'] || c['Grade'],
       'Neurodivergent Response': m['Neurodivergent Response'],
       'Conditions/Diagnoses': p['Conditions/Diagnoses'],
@@ -863,6 +913,97 @@ function rawTabSignatures_(ss) {
   }).join('||');
 }
 
+
+function ensureCohortInfrastructure_(ss) {
+  ensureRawCohortHeaders_(ss);
+  ensureSheetWithHeaders_(ss, COHORTS_SHEET, COHORT_HEADERS);
+}
+
+function ensureRawCohortHeaders_(ss) {
+  [SHEETS.PRESCREEN_RAW, SHEETS.CONSENT_RAW].forEach(name => appendMissingHeadersAtRow_(ss.getSheetByName(name), COHORT_FIELDS, RAW_HEADER_ROW));
+}
+
+function ensureCoreOutputHeaders_(ss) {
+  [SHEETS.PRESCREEN_CLEAN, SHEETS.CONSENT_CLEAN, SHEETS.MASTER, SHEETS.FOLLOWUP, SHEETS.READY, MATCH_REVIEW_SHEET, UNMATCHED_CONSENT_SHEET]
+    .forEach(name => appendMissingHeaders_(ss.getSheetByName(name), COHORT_FIELDS));
+}
+
+function getRequestedCohort_(e, payload) {
+  const source = Object.assign({}, payload || {}, (e && e.parameter) || {});
+  return {
+    cohortId: String(source.cohort_id || source.cohortId || source['Cohort ID'] || source.cohort || '').trim(),
+    cohortName: String(source.cohort_name || source.cohortName || source['Cohort Name'] || '').trim(),
+    site: String(source.site || source.Site || '').trim(),
+    programTerm: String(source.program_term || source.programTerm || source.term || source['Program Term'] || '').trim()
+  };
+}
+
+function cohortFieldsFrom_(cohort) {
+  cohort = cohort || {};
+  return {
+    'Cohort ID': cohort.cohortId || '',
+    'Cohort Name': cohort.cohortName || '',
+    'Site': cohort.site || '',
+    'Program Term': cohort.programTerm || ''
+  };
+}
+
+function upsertCohortFromWebhook_(cohort) {
+  if (!cohort || !cohort.cohortId) return;
+  const ss = getSpreadsheet_();
+  const sheet = ensureSheetWithHeaders_(ss, COHORTS_SHEET, COHORT_HEADERS);
+  const rows = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW);
+  const targetIndex = rows.findIndex(row => String(row['Cohort ID'] || '').toLowerCase() === cohort.cohortId.toLowerCase());
+  const rowNumber = targetIndex >= 0 ? targetIndex + DATA_START_ROW : sheet.getLastRow() + 1;
+  const valuesByHeader = {
+    'Cohort ID': cohort.cohortId,
+    'Cohort Name': cohort.cohortName || cohort.cohortId,
+    'Site': cohort.site || '',
+    'Program Term': cohort.programTerm || '',
+    'Status': targetIndex >= 0 ? rows[targetIndex]['Status'] || 'Active' : 'Active',
+    'Prescreening Webhook URL': buildWebhookUrl_('prescreening', cohort),
+    'Notes': targetIndex >= 0 ? rows[targetIndex]['Notes'] || '' : '',
+    'Last Seen': new Date()
+  };
+  COHORT_HEADERS.forEach((header, i) => sheet.getRange(rowNumber, i + 1).setValue(valuesByHeader[header] || ''));
+}
+
+function buildCohortSummaries_(ss, participants, prescreens, consents) {
+  const configured = readObjectsOrEmpty_(ss, COHORTS_SHEET);
+  const byId = new Map();
+  configured.forEach(row => {
+    const id = String(row['Cohort ID'] || '').trim();
+    if (!id) return;
+    byId.set(id, {
+      cohortId: id,
+      cohortName: row['Cohort Name'] || id,
+      site: row['Site'] || '',
+      programTerm: row['Program Term'] || '',
+      status: row['Status'] || '',
+      prescreened: 0,
+      consentSubmitted: 0,
+      masterRecords: 0,
+      followUpNeeded: 0,
+      readyForDarts: 0
+    });
+  });
+  function ensure(id, fallback) {
+    id = String(id || 'Unassigned').trim() || 'Unassigned';
+    if (!byId.has(id)) byId.set(id, Object.assign({cohortId: id, cohortName: id, site: '', programTerm: '', status: id === 'Unassigned' ? 'Needs cohort assignment' : '', prescreened: 0, consentSubmitted: 0, masterRecords: 0, followUpNeeded: 0, readyForDarts: 0}, fallback || {}));
+    return byId.get(id);
+  }
+  prescreens.forEach(row => ensure(row['Cohort ID'], {cohortName: row['Cohort Name'] || row['Cohort ID'] || 'Unassigned', site: row['Site'] || '', programTerm: row['Program Term'] || ''}).prescreened++);
+  participants.forEach(p => {
+    const cohort = ensure(p.cohortId, {cohortName: p.cohortName || p.cohortId || 'Unassigned', site: p.site || '', programTerm: p.programTerm || ''});
+    cohort.masterRecords++;
+    if (p.consentStatus && p.consentStatus !== 'Pending' && p.consentStatus !== 'Review') cohort.consentSubmitted++;
+    if (p.followUpNeeded === 'Yes') cohort.followUpNeeded++;
+    if (p.readyForDarts === 'Yes') cohort.readyForDarts++;
+  });
+  consents.filter(row => row['Cohort ID']).forEach(row => ensure(row['Cohort ID'], {cohortName: row['Cohort Name'] || row['Cohort ID'], site: row['Site'] || '', programTerm: row['Program Term'] || ''}));
+  return Array.from(byId.values()).sort((a, b) => String(a.cohortId).localeCompare(String(b.cohortId)));
+}
+
 function getConfig_(ss) {
   const rows = ss.getSheetByName(SHEETS.CONFIG).getDataRange().getValues();
   const map = new Map(rows.slice(1).map(r => [String(r[0] || '').trim(), r[1]]));
@@ -934,6 +1075,17 @@ function ensureSheetWithHeaders_(ss, sheetName, headers) {
   }
   appendMissingHeaders_(sheet, headers);
   return sheet;
+}
+
+function appendMissingHeadersAtRow_(sheet, fields, headerRow) {
+  if (!sheet) return;
+  const lastColumn = Math.max(sheet.getLastColumn(), 1);
+  const headers = sheet.getRange(headerRow, 1, 1, lastColumn).getValues()[0].map(String);
+  fields.forEach(field => {
+    if (headers.includes(field)) return;
+    sheet.getRange(headerRow, sheet.getLastColumn() + 1).setValue(field);
+    headers.push(field);
+  });
 }
 
 function appendMissingHeaders_(sheet, fields) {
@@ -1049,7 +1201,10 @@ function scoreConsentMatch_(prescreen, consent) {
   }
   if (pChild.last && cChild.last && pChild.last === cChild.last) { score += 5; reasons.push('Child last name exact'); }
   if (gradeCompatible_(prescreen['Child Grade'], consent['Grade'])) { score += 5; reasons.push('Grade compatible'); }
-  return {score: Math.min(score, 100), reasons};
+  if (prescreen['Cohort ID'] && consent['Cohort ID'] && String(prescreen['Cohort ID']).toLowerCase() === String(consent['Cohort ID']).toLowerCase()) { score += 8; reasons.push('Cohort exact'); }
+  if (prescreen['Site'] && consent['Site'] && String(prescreen['Site']).toLowerCase() === String(consent['Site']).toLowerCase()) { score += 3; reasons.push('Site exact'); }
+  if (prescreen['Cohort ID'] && consent['Cohort ID'] && String(prescreen['Cohort ID']).toLowerCase() !== String(consent['Cohort ID']).toLowerCase()) { score -= 10; reasons.push('Different cohort values; review recommended'); }
+  return {score: Math.max(0, Math.min(score, 100)), reasons};
 }
 
 function describeConsentMatch_(consent, score, reasons) {
@@ -1189,8 +1344,10 @@ function parseFormEncoded_(contents) {
     return obj;
   }, {});
 }
-function appendRawPayload_(formType, payload) {
+function appendRawPayload_(formType, payload, cohort) {
+  ensureRawCohortHeaders_(getSpreadsheet_());
   const flattened = flattenPayload_(payload);
+  Object.assign(flattened, cohortFieldsFrom_(cohort));
   Object.assign(flattened, extractQuestionProResponseSet_(payload));
   removeRoutingOnlyFields_(flattened);
   flattened._rawPayload = JSON.stringify(payload);
@@ -1198,7 +1355,7 @@ function appendRawPayload_(formType, payload) {
 }
 
 function removeRoutingOnlyFields_(obj) {
-  ['form', 'formType', 'surveyType'].forEach(key => delete obj[key]);
+  ['form', 'formType', 'surveyType', 'cohort_id', 'cohort_name', 'cohortId', 'cohortName', 'program_term'].forEach(key => delete obj[key]);
 }
 function extractQuestionProResponseSet_(payload) {
   const out = {};
