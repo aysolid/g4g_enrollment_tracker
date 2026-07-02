@@ -275,8 +275,12 @@ function refreshEnrollmentTracker() {
   ensureCohortInfrastructure_(ss);
   ensureEmailWorkflowInfrastructure_(ss);
 
-  const prescreenRows = readRawRows_(ss.getSheetByName(SHEETS.PRESCREEN_RAW));
-  const consentRows = readRawRows_(ss.getSheetByName(SHEETS.CONSENT_RAW));
+  const prescreenRawSheet = ss.getSheetByName(SHEETS.PRESCREEN_RAW);
+  const consentRawSheet = ss.getSheetByName(SHEETS.CONSENT_RAW);
+  const prescreenRows = readRawRows_(prescreenRawSheet);
+  const consentRows = readRawRows_(consentRawSheet);
+  applyRawSheetFormatting_(prescreenRawSheet);
+  applyRawSheetFormatting_(consentRawSheet);
 
   const prescreenClean = prescreenRows.map((row, i) => normalizePrescreening_(row, i + 1, config));
   const consentClean = consentRows.map((row, i) => normalizeConsent_(row, i + 1, config));
@@ -695,7 +699,7 @@ function refreshDashboard() {
 
 function normalizePrescreening_(raw, index, config) {
   const responseId = getFirst_(raw, ['Response ID', 'ResponseID']) || `P-MANUAL-${index}`;
-  const neuroRaw = getByContains_(raw, ['identify as neurodivergent', 'diagnosed disability', 'learning difference']);
+  const neuroRaw = getNeurodivergentRawResponse_(raw);
   const neuro = decodeQuestionProNeuroResponse_(neuroRaw);
   const conditions = collectOptionValues_(raw, ['Autism', 'ADHD', 'Dyslexia', 'Intellectual disability', 'Developmental disability', 'Epilepsy', 'Traumatic brain injury', 'OCD', 'Down Syndrome', 'Other genetic condition', 'Other (Please specify)']);
   const physicalSupports = getByContains_(raw, ['physically disabled', 'additional supports']);
@@ -1601,6 +1605,16 @@ function applyOutputFormatting_(sheet, dataRows, columns) {
   sheet.setRowHeights(2, rowsToFormat, 24);
 }
 
+function applyRawSheetFormatting_(sheet) {
+  if (!sheet) return;
+  const rows = Math.max(sheet.getMaxRows(), sheet.getLastRow(), RAW_DATA_START_ROW);
+  const columns = Math.max(sheet.getMaxColumns(), sheet.getLastColumn(), 1);
+  sheet.getRange(1, 1, rows, columns)
+    .setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP)
+    .setVerticalAlignment('middle');
+  if (rows >= RAW_DATA_START_ROW) sheet.setRowHeights(RAW_DATA_START_ROW, rows - RAW_DATA_START_ROW + 1, 24);
+}
+
 function ensureMasterMatchColumns_(ss) {
   appendMissingHeaders_(ss.getSheetByName(SHEETS.MASTER), MASTER_MATCH_FIELDS);
 }
@@ -1833,6 +1847,45 @@ function collectOptionValues_(obj, options) {
   return [...new Set(found)].join('; ');
 }
 
+function getNeurodivergentRawResponse_(raw) {
+  const direct = getByHeaderPattern_(raw, key => {
+    const normalized = normalizeHeaderKey_(key);
+    return normalized.includes('doesyourchildidentifyasneurodivergent') ||
+      (normalized.includes('diagnoseddisability') && normalized.includes('developmental')) ||
+      (normalized.includes('neurodivergent') && normalized.includes('learningdifference'));
+  });
+  if (direct !== '') return direct;
+
+  const fallbackPayload = getFirst_(raw, ['External Reference', 'Custom Variable 5']);
+  const parsed = parseJsonIfPossible_(fallbackPayload);
+  if (parsed) {
+    const extracted = extractQuestionProResponseSet_(parsed);
+    const extractedDirect = getByHeaderPattern_(extracted, key => {
+      const normalized = normalizeHeaderKey_(key);
+      return normalized.includes('doesyourchildidentifyasneurodivergent') ||
+        (normalized.includes('diagnoseddisability') && normalized.includes('developmental')) ||
+        (normalized.includes('neurodivergent') && normalized.includes('learningdifference'));
+    });
+    if (extractedDirect !== '') return extractedDirect;
+  }
+
+  return getByContains_(raw, ['identify as neurodivergent', 'diagnosed disability']);
+}
+
+function getByHeaderPattern_(obj, predicate) {
+  for (const [key, value] of Object.entries(obj || {})) {
+    if (value !== '' && value !== null && value !== undefined && !isRawPayloadValue_(value) && predicate(key)) return value;
+  }
+  return '';
+}
+
+function parseJsonIfPossible_(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!/^[\[{]/.test(trimmed)) return null;
+  try { return JSON.parse(trimmed); } catch (err) { return null; }
+}
+
 /**
  * QuestionPro stores the prescreening neurodivergence question as numeric choices:
  * 1 = No (child is not neurodivergent), 2 = Yes (child is neurodivergent).
@@ -1870,15 +1923,15 @@ function parseWebhookPayload_(e) {
   const payload = {};
   Object.assign(payload, e.parameter || {});
   const contents = e.postData && e.postData.contents ? String(e.postData.contents).trim() : '';
-  if (!contents) return payload;
+  if (!contents) return expandEmbeddedJsonPayloads_(payload);
   try {
     const parsed = JSON.parse(contents);
-    return Object.assign(payload, parsed);
+    return expandEmbeddedJsonPayloads_(Object.assign(payload, parsed));
   } catch (err) {
     // QuestionPro may send form-encoded bodies instead of raw JSON.
     if (contents.includes('=')) Object.assign(payload, parseFormEncoded_(contents));
     else payload.rawBody = contents;
-    return payload;
+    return expandEmbeddedJsonPayloads_(payload);
   }
 }
 function getRequestedFormType_(e, payload) {
@@ -1908,19 +1961,55 @@ function appendRawPayload_(formType, payload, cohort) {
 function removeRoutingOnlyFields_(obj) {
   ['form', 'formType', 'surveyType', 'cohort_id', 'cohort_name', 'cohortId', 'cohortName', 'program_term'].forEach(key => delete obj[key]);
 }
+function expandEmbeddedJsonPayloads_(payload) {
+  const expanded = Object.assign({}, payload);
+  ['complete_response', 'completeResponse', 'response', 'payload', 'rawBody'].forEach(key => {
+    const value = expanded[key];
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (!trimmed || !/^[\[{]/.test(trimmed)) return;
+    try {
+      const parsed = JSON.parse(trimmed);
+      Object.assign(expanded, parsed);
+      expanded[key] = value;
+    } catch (err) {
+      // Keep the original field for audit purposes when it is not valid JSON.
+    }
+  });
+  return expanded;
+}
+
 function extractQuestionProResponseSet_(payload) {
   const out = {};
-  const responseSet = Array.isArray(payload.responseSet) ? payload.responseSet : [];
-  responseSet.forEach(item => {
-    const key = item.questionText || item.questionDescription || item.questionCode || item.questionID;
-    const value = extractQuestionProAnswer_(item);
-    if (key && value !== '') out[key] = value;
-    if (item.questionCode && value !== '') out[item.questionCode] = value;
+  findQuestionProResponseSets_(payload).forEach(responseSet => {
+    responseSet.forEach(item => {
+      const key = item.questionText || item.questionDescription || item.questionCode || item.questionID;
+      const value = extractQuestionProAnswer_(item);
+      if (key && value !== '') out[key] = value;
+      if (item.questionCode && value !== '') out[item.questionCode] = value;
+    });
   });
   return out;
 }
+
+function findQuestionProResponseSets_(value, sets = []) {
+  if (!value || typeof value !== 'object') return sets;
+  if (Array.isArray(value)) {
+    if (value.some(item => item && typeof item === 'object' && (item.questionText || item.questionDescription || item.questionCode || item.questionID))) {
+      sets.push(value);
+    } else {
+      value.forEach(item => findQuestionProResponseSets_(item, sets));
+    }
+    return sets;
+  }
+  Object.entries(value).forEach(([key, child]) => {
+    if (key === 'responseSet' && Array.isArray(child)) findQuestionProResponseSets_(child, sets);
+    else findQuestionProResponseSets_(child, sets);
+  });
+  return sets;
+}
 function extractQuestionProAnswer_(item) {
-  const directFields = ['answerText', 'answer', 'responseText', 'response', 'value', 'selectedAnswer', 'displayText'];
+  const directFields = ['answerText', 'answer', 'responseText', 'response', 'value', 'answerValue', 'selectedAnswer', 'displayText', 'answerCode', 'answerID', 'optionCode', 'recodeValue'];
   for (const field of directFields) {
     const value = normalizeCellValue_(item[field]);
     if (value !== '') return value;
@@ -1938,7 +2027,7 @@ function normalizeCellValue_(value) {
   if (value instanceof Date) return value;
   if (Array.isArray(value)) return value.map(normalizeCellValue_).filter(Boolean).join('; ');
   if (typeof value !== 'object') return String(value).trim();
-  const answerFields = ['answerText', 'text', 'value', 'label', 'displayText', 'optionText', 'option', 'code', 'name', 'email', 'phone'];
+  const answerFields = ['answerText', 'text', 'value', 'answerValue', 'label', 'displayText', 'optionText', 'option', 'code', 'answerCode', 'optionCode', 'recodeValue', 'name', 'email', 'phone'];
   for (const field of answerFields) {
     if (value[field] === value) continue;
     const normalized = normalizeCellValue_(value[field]);
@@ -1954,6 +2043,7 @@ function appendRawObjectForTest_(sheetName, obj) {
   const row = headers.map(h => valueForHeader_(h, obj, normalizedObj));
   ensureRawFallbackValues_(headers, row, obj);
   sh.appendRow(row);
+  applyRawSheetFormatting_(sh);
 }
 function normalizeObjectKeys_(obj) {
   const out = {};
