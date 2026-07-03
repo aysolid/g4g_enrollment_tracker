@@ -1848,28 +1848,30 @@ function collectOptionValues_(obj, options) {
 }
 
 function getNeurodivergentRawResponse_(raw) {
-  const direct = getByHeaderPattern_(raw, key => {
-    const normalized = normalizeHeaderKey_(key);
-    return normalized.includes('doesyourchildidentifyasneurodivergent') ||
-      (normalized.includes('diagnoseddisability') && normalized.includes('developmental')) ||
-      (normalized.includes('neurodivergent') && normalized.includes('learningdifference'));
-  });
+  const direct = getByHeaderPattern_(raw, isNeurodivergentQuestionKey_);
   if (direct !== '') return direct;
 
-  const fallbackPayload = getFirst_(raw, ['External Reference', 'Custom Variable 5']);
-  const parsed = parseJsonIfPossible_(fallbackPayload);
-  if (parsed) {
+  const fallbackPayloads = ['External Reference', 'Custom Variable 5', '_rawPayload', 'complete_response', 'completeResponse', 'rawBody', 'payload']
+    .map(key => raw[key])
+    .filter(Boolean);
+  for (const fallbackPayload of fallbackPayloads) {
+    const parsed = parseJsonIfPossible_(fallbackPayload);
+    if (!parsed) continue;
     const extracted = extractQuestionProResponseSet_(parsed);
-    const extractedDirect = getByHeaderPattern_(extracted, key => {
-      const normalized = normalizeHeaderKey_(key);
-      return normalized.includes('doesyourchildidentifyasneurodivergent') ||
-        (normalized.includes('diagnoseddisability') && normalized.includes('developmental')) ||
-        (normalized.includes('neurodivergent') && normalized.includes('learningdifference'));
-    });
+    const extractedDirect = getByHeaderPattern_(extracted, isNeurodivergentQuestionKey_);
     if (extractedDirect !== '') return extractedDirect;
   }
 
   return getByContains_(raw, ['identify as neurodivergent', 'diagnosed disability']);
+}
+
+function isNeurodivergentQuestionKey_(key) {
+  const normalized = normalizeHeaderKey_(key);
+  return normalized.includes('doesyourchildidentifyasneurodivergent') ||
+    normalized.includes('neurodivergentresponse') ||
+    (normalized.includes('neurodivergent') && !normalized.includes('neurodiverselearners')) ||
+    (normalized.includes('diagnoseddisability') && normalized.includes('developmental')) ||
+    (normalized.includes('learningdifference') && normalized.includes('disability'));
 }
 
 function getByHeaderPattern_(obj, predicate) {
@@ -1942,7 +1944,9 @@ function getRequestedFormType_(e, payload) {
 }
 function parseFormEncoded_(contents) {
   return contents.split('&').reduce((obj, pair) => {
-    const [rawKey, rawValue = ''] = pair.split('=');
+    const separator = pair.indexOf('=');
+    const rawKey = separator >= 0 ? pair.slice(0, separator) : pair;
+    const rawValue = separator >= 0 ? pair.slice(separator + 1) : '';
     const key = decodeURIComponent(rawKey.replace(/\+/g, ' '));
     obj[key] = decodeURIComponent(rawValue.replace(/\+/g, ' '));
     return obj;
@@ -2014,11 +2018,15 @@ function extractQuestionProAnswer_(item) {
     const value = normalizeCellValue_(item[field]);
     if (value !== '') return value;
   }
-  const arrayFields = ['answers', 'answerValues', 'values', 'selectedAnswers'];
-  for (const field of arrayFields) {
-    if (!Array.isArray(item[field])) continue;
-    const values = item[field].map(normalizeCellValue_).filter(Boolean);
-    if (values.length) return values.join('; ');
+  const answerContainerFields = ['answers', 'answerValues', 'values', 'selectedAnswers', 'responseAnswers', 'answerOptions', 'selectedOptions'];
+  for (const field of answerContainerFields) {
+    if (Array.isArray(item[field])) {
+      const values = item[field].map(normalizeCellValue_).filter(Boolean);
+      if (values.length) return values.join('; ');
+    } else if (item[field] && typeof item[field] === 'object') {
+      const value = normalizeCellValue_(item[field]);
+      if (value !== '') return value;
+    }
   }
   return '';
 }
@@ -2069,6 +2077,11 @@ function ensureRawFallbackValues_(headers, row, obj) {
   setRawFallback_(headers, row, ['Response ID', 'ResponseID', 'responseId'], obj['Response ID'] || obj.responseId || obj.id || `WEBHOOK-${Date.now()}`);
   setRawFallback_(headers, row, ['Response Status'], obj['Response Status'] || obj.status || 'Completed');
   setRawFallback_(headers, row, ['Timestamp (mm/dd/yyyy)', 'Timestamp'], obj['Timestamp (mm/dd/yyyy)'] || obj.timestamp || new Date());
+  setRawFallback_(headers, row, [
+    'Does your child identify as neurodivergent or have a diagnosed disability developmental condition or learning difference?',
+    'Does your child identify as neurodivergent or have a diagnosed disability developmental',
+    'Neurodivergent Response'
+  ], getNeurodivergentRawResponse_(obj));
   setRawFallback_(headers, row, ['Custom Variable 5', 'External Reference'], obj._rawPayload || JSON.stringify(obj || {}));
 }
 function setRawFallback_(headers, row, possibleHeaders, value) {
