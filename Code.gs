@@ -311,11 +311,11 @@ function refreshEnrollmentTracker() {
 
 
 function getProfessorDashboardData() {
-  return buildProfessorDashboardData_(false);
+  return jsonSafe_(buildProfessorDashboardData_(false));
 }
 
 function refreshProfessorDashboardData() {
-  return buildProfessorDashboardData_(true);
+  return jsonSafe_(buildProfessorDashboardData_(true));
 }
 
 function getAppDashboardData() {
@@ -347,7 +347,7 @@ function buildAppDashboardData_(shouldRefresh) {
   const emailLog = readObjectsOrEmpty_(ss, EMAIL_LOG_SHEET);
   const replyLog = readObjectsOrEmpty_(ss, REPLY_LOG_SHEET);
   const reminderQueue = readObjectsOrEmpty_(ss, REMINDER_QUEUE_SHEET);
-  return {
+  const payload = {
     generatedAt: new Date().toISOString(),
     spreadsheetName: ss.getName(),
     metrics: buildCommandCenterMetrics_(professor.summary, dashboardRows, matchReview, unmatchedConsents),
@@ -381,6 +381,7 @@ function buildAppDashboardData_(shouldRefresh) {
       consentWebhook: buildWebhookUrl_('consent')
     }
   };
+  return jsonSafe_(payload);
 }
 
 function readObjectsOrEmpty_(ss, sheetName) {
@@ -2107,5 +2108,6 @@ function normalizePhone_(v) { const d = String(v || '').replace(/\D/g, ''); retu
 function normalizeToken_(v) { return String(v || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
 function countRows_(ss, name) { const sheet = ss.getSheetByName(name); return sheet ? readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW).length : 0; }
 function countWhere_(ss, name, field, expected) { const sheet = ss.getSheetByName(name); return sheet ? readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW).filter(r => r[field] === expected).length : 0; }
+function jsonSafe_(obj) { return JSON.parse(JSON.stringify(obj || {})); }
 function jsonResponse_(obj) { return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON); }
 function ensureRequiredSheets_(ss) { Object.values(SHEETS).forEach(n => { if (!ss.getSheetByName(n)) throw new Error(`Missing required sheet: ${n}`); }); }
