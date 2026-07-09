@@ -5,8 +5,9 @@
  * QuestionPro webhook/manual raw import -> Prescreening_Raw/Consent_Raw audit tabs
  * -> normalized clean tabs -> Master_Enrollment -> Followup_Queue and Ready_For_DARTS.
  *
- * Email automation is supervised: Apps Script drafts and approves email jobs, while
- * Power Automate + Outlook handles actual sending/reply callbacks once configured.
+ * Email automation is supervised: Apps Script drafts and approves email jobs.
+ * For no-premium Outlook sending, Power Automate uses the Standard Google Sheets
+ * connector bridge sheets instead of the Premium HTTP connector.
  */
 
 const SHEETS = Object.freeze({
@@ -66,6 +67,9 @@ const EMAIL_LOG_SHEET = 'Email_Log';
 const REPLY_LOG_SHEET = 'Reply_Log';
 const REMINDER_QUEUE_SHEET = 'Reminder_Queue';
 const POWER_AUTOMATE_CONFIG_SHEET = 'Power_Automate_Config';
+const PA_EMAIL_OUTBOX_SHEET = 'PA_Email_Outbox';
+const PA_EMAIL_STATUS_SHEET = 'PA_Email_Status';
+const PA_REPLY_INBOX_SHEET = 'PA_Reply_Inbox';
 const EMAIL_TEMPLATE_HEADERS = [
   'TemplateID', 'Template Name', 'Email Type', 'Subject Template', 'Body Template',
   'Active', 'Requires Approval', 'Approved By', 'Approved Date', 'Last Updated', 'Notes'
@@ -96,6 +100,23 @@ const REMINDER_QUEUE_HEADERS = [
   'Power Automate Run ID', 'Error Message', 'Created At', 'Notes'
 ];
 const POWER_AUTOMATE_CONFIG_HEADERS = ['Setting', 'Value', 'Notes'];
+const PA_EMAIL_OUTBOX_HEADERS = [
+  'email_job_id', 'enrollment_id', 'parent_email', 'parent_name', 'parent_phone',
+  'child_name', 'cohort_id', 'cohort_name', 'site', 'program_term',
+  'email_type', 'template_id', 'subject', 'body_text', 'body_html',
+  'approval_status', 'send_status', 'scheduled_send_at', 'sent_at',
+  'do_not_send', 'retry_count', 'last_attempt_at', 'error_message',
+  'power_automate_run_id', 'reply_status', 'created_at', 'updated_at', 'notes'
+];
+const PA_EMAIL_STATUS_HEADERS = [
+  'status_id', 'email_job_id', 'enrollment_id', 'status', 'sent_at',
+  'attempted_at', 'run_id', 'error_message', 'raw_response', 'processed_at'
+];
+const PA_REPLY_INBOX_HEADERS = [
+  'reply_id', 'email_job_id', 'enrollment_id', 'parent_email', 'from_name',
+  'from_address', 'subject', 'received_at', 'body_preview', 'body_text',
+  'message_id', 'has_attachments', 'raw_response', 'processed_at', 'notes'
+];
 const EMAIL_FOLLOWUP_FIELDS = [
   'Email Workflow Status', 'Latest EmailJobID', 'Latest Email Type', 'Latest Email Subject',
   'Latest Email Approved At', 'Latest Email Sent At', 'Latest Reply Received At',
@@ -128,6 +149,7 @@ function onOpen() {
     .addItem('Refresh tracker from raw tabs', 'refreshEnrollmentTracker')
     .addItem('Install raw-tab automation', 'installRawTabAutomation')
     .addItem('Initialize email workflow sheets', 'initializeEmailWorkflow')
+    .addItem('Sync no-premium Outlook bridge sheets', 'syncNoPremiumOutlookBridge')
     .addItem('Rebuild dashboard counts', 'refreshDashboard')
     .addSeparator()
     .addItem('Run self-test with sample rows', 'runPhaseOneSelfTest')
@@ -347,6 +369,9 @@ function buildAppDashboardData_(shouldRefresh) {
   const emailLog = readObjectsOrEmpty_(ss, EMAIL_LOG_SHEET);
   const replyLog = readObjectsOrEmpty_(ss, REPLY_LOG_SHEET);
   const reminderQueue = readObjectsOrEmpty_(ss, REMINDER_QUEUE_SHEET);
+  const paEmailOutbox = readObjectsOrEmpty_(ss, PA_EMAIL_OUTBOX_SHEET);
+  const paEmailStatus = readObjectsOrEmpty_(ss, PA_EMAIL_STATUS_SHEET);
+  const paReplyInbox = readObjectsOrEmpty_(ss, PA_REPLY_INBOX_SHEET);
   const payload = {
     generatedAt: new Date().toISOString(),
     spreadsheetName: ss.getName(),
@@ -367,6 +392,9 @@ function buildAppDashboardData_(shouldRefresh) {
     emailLog,
     replyLog,
     reminderQueue,
+    paEmailOutbox,
+    paEmailStatus,
+    paReplyInbox,
     emailMetrics: buildEmailMetrics_(emailOutbox, emailLog, replyLog, reminderQueue),
     rawCounts: {
       prescreening: readRawRows_(ss.getSheetByName(SHEETS.PRESCREEN_RAW)).length,
@@ -967,7 +995,7 @@ function runPhaseOneSelfTest() {
 }
 
 
-// ---------- Email workflow / Power Automate handoff ----------
+// ---------- Email workflow / no-premium Outlook bridge ----------
 
 function initializeEmailWorkflow() {
   const ss = getSpreadsheet_();
@@ -982,6 +1010,9 @@ function ensureEmailWorkflowInfrastructure_(ss) {
   ensureSheetWithHeaders_(ss, REPLY_LOG_SHEET, REPLY_LOG_HEADERS);
   ensureSheetWithHeaders_(ss, REMINDER_QUEUE_SHEET, REMINDER_QUEUE_HEADERS);
   ensureSheetWithHeaders_(ss, POWER_AUTOMATE_CONFIG_SHEET, POWER_AUTOMATE_CONFIG_HEADERS);
+  ensureSheetWithHeaders_(ss, PA_EMAIL_OUTBOX_SHEET, PA_EMAIL_OUTBOX_HEADERS);
+  ensureSheetWithHeaders_(ss, PA_EMAIL_STATUS_SHEET, PA_EMAIL_STATUS_HEADERS);
+  ensureSheetWithHeaders_(ss, PA_REPLY_INBOX_SHEET, PA_REPLY_INBOX_HEADERS);
   appendMissingHeaders_(ss.getSheetByName(SHEETS.FOLLOWUP), EMAIL_FOLLOWUP_FIELDS);
   seedDefaultEmailTemplates_(templates);
 }
@@ -1114,6 +1145,7 @@ function approveEmailForSending(request) {
     'Latest Email Type': record['Email Type'],
     'Latest Email Subject': record['Email Subject']
   });
+  syncApprovedEmailsToPaOutbox_(ss);
   return buildAppDashboardData_(false);
 }
 
@@ -1129,6 +1161,161 @@ function cancelEmailJob(request) {
   appendEmailLog_(ss, Object.assign({}, rowInfo.object, updates), 'Cancelled', 'Cancelled', '', '');
   updateFollowupEmailFields_(ss, rowInfo.object['EnrollmentID'], {'Email Workflow Status': 'Cancelled'});
   return buildAppDashboardData_(false);
+}
+
+/**
+ * No-premium Outlook bridge for Power Automate.
+ *
+ * This keeps Outlook sending possible without the Premium HTTP connector:
+ * - Apps Script/dashboard remains the source of truth for drafts and approvals.
+ * - Power Automate Standard Google Sheets connector reads PA_Email_Outbox.
+ * - Power Automate writes send results to PA_Email_Status and replies to PA_Reply_Inbox.
+ * - This sync imports those rows back into Email_Outbox, Email_Log, Reply_Log, and Followup_Queue.
+ */
+function syncNoPremiumOutlookBridge() {
+  const ss = getSpreadsheet_();
+  ensureEmailWorkflowInfrastructure_(ss);
+  const exported = syncApprovedEmailsToPaOutbox_(ss);
+  const statuses = syncPaEmailStatuses_(ss);
+  const replies = syncPaReplyInbox_(ss);
+  return Object.assign({ok: true}, exported, statuses, replies, {dashboard: buildAppDashboardData_(false)});
+}
+
+function syncApprovedEmailsToPaOutbox_(ss) {
+  const outbox = ss.getSheetByName(EMAIL_OUTBOX_SHEET);
+  const bridge = ss.getSheetByName(PA_EMAIL_OUTBOX_SHEET);
+  const now = new Date();
+  let exported = 0;
+  readObjects_(outbox, CLEAN_HEADER_ROW, DATA_START_ROW)
+    .filter(isEmailJobEligibleForOutlookBridge_)
+    .forEach(row => {
+      upsertByKey_(bridge, PA_EMAIL_OUTBOX_HEADERS, 'email_job_id', row['EmailJobID'], paOutboxRecordFor_(row, now));
+      exported += 1;
+    });
+  return {paOutboxExported: exported};
+}
+
+function isEmailJobEligibleForOutlookBridge_(row) {
+  if (row['Approval Status'] !== 'Approved') return false;
+  if (!['Ready To Send', 'Scheduled', 'Failed'].includes(String(row['Send Status'] || ''))) return false;
+  if (row['Do Not Send'] === 'Yes' || row['Sent At']) return false;
+  if (row['Scheduled Send At'] && new Date(row['Scheduled Send At']) > new Date()) return false;
+  return Boolean(row['EmailJobID'] && row['Parent Email']);
+}
+
+function paOutboxRecordFor_(row, now) {
+  return {
+    'email_job_id': row['EmailJobID'] || '',
+    'enrollment_id': row['EnrollmentID'] || '',
+    'parent_email': row['Parent Email'] || '',
+    'parent_name': row['Parent/Caretaker Name'] || '',
+    'parent_phone': row['Parent Phone'] || '',
+    'child_name': row['Child Full Name'] || '',
+    'cohort_id': row['Cohort ID'] || '',
+    'cohort_name': row['Cohort Name'] || '',
+    'site': row['Site'] || '',
+    'program_term': row['Program Term'] || '',
+    'email_type': row['Email Type'] || '',
+    'template_id': row['TemplateID'] || '',
+    'subject': row['Email Subject'] || '',
+    'body_text': row['Email Body'] || '',
+    'body_html': row['Email Body HTML'] || '',
+    'approval_status': row['Approval Status'] || '',
+    'send_status': row['Send Status'] || '',
+    'scheduled_send_at': row['Scheduled Send At'] || '',
+    'sent_at': row['Sent At'] || '',
+    'do_not_send': row['Do Not Send'] || 'No',
+    'retry_count': row['Retry Count'] || 0,
+    'last_attempt_at': row['Last Attempt At'] || '',
+    'error_message': row['Error Message'] || '',
+    'power_automate_run_id': row['Power Automate Run ID'] || '',
+    'reply_status': row['Reply Status'] || '',
+    'created_at': row['Created At'] || now,
+    'updated_at': now,
+    'notes': row['Notes'] || ''
+  };
+}
+
+function syncPaEmailStatuses_(ss) {
+  const statusSheet = ss.getSheetByName(PA_EMAIL_STATUS_SHEET);
+  let imported = 0;
+  readObjects_(statusSheet, CLEAN_HEADER_ROW, DATA_START_ROW).forEach(statusRow => {
+    if (statusRow['processed_at'] || !statusRow['email_job_id']) return;
+    const result = receivePowerAutomateSendUpdate_({
+      secret: getPowerAutomateConfigValue_('PowerAutomateCallbackSecret'),
+      emailJobId: statusRow['email_job_id'],
+      status: statusRow['status'] || 'Sent',
+      sentAt: statusRow['sent_at'],
+      attemptedAt: statusRow['attempted_at'],
+      runId: statusRow['run_id'],
+      errorMessage: statusRow['error_message'],
+      rawResponse: statusRow['raw_response']
+    });
+    updatePaOutboxFromStatus_(ss, statusRow);
+    const rowInfo = statusRow['status_id']
+      ? findRowByKey_(statusSheet, 'status_id', statusRow['status_id'])
+      : findRowByKey_(statusSheet, 'email_job_id', statusRow['email_job_id']);
+    if (rowInfo.rowNumber) updateRowByHeader_(statusSheet, rowInfo.rowNumber, {'processed_at': new Date()});
+    imported += result && result.ok ? 1 : 0;
+  });
+  return {paStatusesImported: imported};
+}
+
+function updatePaOutboxFromStatus_(ss, statusRow) {
+  const bridge = ss.getSheetByName(PA_EMAIL_OUTBOX_SHEET);
+  const rowInfo = findRowByKey_(bridge, 'email_job_id', statusRow['email_job_id']);
+  if (!rowInfo.rowNumber) return;
+  const sent = /sent|success/i.test(String(statusRow['status'] || 'Sent'));
+  updateRowByHeader_(bridge, rowInfo.rowNumber, {
+    'send_status': sent ? 'Sent' : 'Failed',
+    'sent_at': sent ? (statusRow['sent_at'] || new Date()) : rowInfo.object['sent_at'],
+    'last_attempt_at': statusRow['attempted_at'] || new Date(),
+    'power_automate_run_id': statusRow['run_id'] || rowInfo.object['power_automate_run_id'] || '',
+    'error_message': statusRow['error_message'] || '',
+    'updated_at': new Date()
+  });
+}
+
+function syncPaReplyInbox_(ss) {
+  const replySheet = ss.getSheetByName(PA_REPLY_INBOX_SHEET);
+  let imported = 0;
+  readObjects_(replySheet, CLEAN_HEADER_ROW, DATA_START_ROW).forEach(replyRow => {
+    if (replyRow['processed_at'] || !replyRow['email_job_id']) return;
+    const result = receivePowerAutomateReply_({
+      secret: getPowerAutomateConfigValue_('PowerAutomateCallbackSecret'),
+      replyId: replyRow['reply_id'],
+      emailJobId: replyRow['email_job_id'],
+      enrollmentId: replyRow['enrollment_id'],
+      parentEmail: replyRow['parent_email'],
+      fromName: replyRow['from_name'],
+      fromAddress: replyRow['from_address'],
+      subject: replyRow['subject'],
+      receivedAt: replyRow['received_at'],
+      bodyPreview: replyRow['body_preview'],
+      bodyText: replyRow['body_text'],
+      messageId: replyRow['message_id'],
+      hasAttachments: replyRow['has_attachments'],
+      notes: replyRow['notes'],
+      rawResponse: replyRow['raw_response']
+    });
+    updatePaOutboxReplyStatus_(ss, replyRow);
+    const rowInfo = replyRow['reply_id']
+      ? findRowByKey_(replySheet, 'reply_id', replyRow['reply_id'])
+      : findRowByKey_(replySheet, 'email_job_id', replyRow['email_job_id']);
+    if (rowInfo.rowNumber) updateRowByHeader_(replySheet, rowInfo.rowNumber, {'processed_at': new Date()});
+    imported += result && result.ok ? 1 : 0;
+  });
+  return {paRepliesImported: imported};
+}
+
+function updatePaOutboxReplyStatus_(ss, replyRow) {
+  const bridge = ss.getSheetByName(PA_EMAIL_OUTBOX_SHEET);
+  const rowInfo = findRowByKey_(bridge, 'email_job_id', replyRow['email_job_id']);
+  if (!rowInfo.rowNumber) return;
+  updateRowByHeader_(bridge, rowInfo.rowNumber, {
+    'reply_status': 'Reply Received',
+    'updated_at': new Date()
+  });
 }
 
 function markDoNotContact(request) {
