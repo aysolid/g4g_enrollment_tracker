@@ -40,6 +40,8 @@ const FOLLOWUP_REVIEW_FIELDS = [
   'Human Eligibility Decision', 'Decision Reason', 'Reviewed By', 'Review Date', 'PI Notes'
 ];
 const SCREENING_MANUAL_FIELDS = [
+  'Child Full Name', 'Parent/Caretaker Name', 'Parent Email', 'Parent Phone',
+  'Cohort ID', 'Cohort Name', 'Site', 'Program Term',
   'Human Eligibility Decision', 'Decision Reason', 'Manual Contact Needed', 'Manual Contact Status',
   'Assigned To', 'Updated Support Details', 'Parent Response Summary', 'Eligibility Review Status',
   'Reviewed By', 'Review Date', 'PI Notes', 'Notes'
@@ -67,7 +69,8 @@ const MASTER_MATCH_FIELDS = [
 ];
 const MATCH_REVIEW_HEADERS = [
   'EnrollmentID', 'Prescreening ResponseID', 'Child Full Name', 'Parent/Caretaker Name',
-  'Parent Email', 'Parent Phone', 'Match Status', 'Match Confidence Score',
+  'Parent Email', 'Parent Phone', 'Cohort ID', 'Cohort Name', 'Site', 'Program Term',
+  'Match Status', 'Match Confidence Score',
   'Match Reasons', 'Possible Consent Matches', 'Manual Consent ResponseID',
   'Manual Match Notes', 'Last Updated'
 ];
@@ -794,14 +797,14 @@ function buildScreeningReview_(prescreens, manualByEnrollment, legacyByEnrollmen
       'PrescreeningID': p['PrescreeningID'] || '',
       'ResponseID': p['ResponseID'] || '',
       'Submitted At': p['Submitted At'] || '',
-      'Child Full Name': p['Child Full Name'] || '',
-      'Parent/Caretaker Name': p['Parent/Caretaker Name'] || '',
-      'Parent Email': p['Parent Email'] || '',
-      'Parent Phone': p['Parent Phone'] || '',
-      'Cohort ID': p['Cohort ID'] || '',
-      'Cohort Name': p['Cohort Name'] || '',
-      'Site': p['Site'] || '',
-      'Program Term': p['Program Term'] || '',
+      'Child Full Name': manual['Child Full Name'] || p['Child Full Name'] || '',
+      'Parent/Caretaker Name': manual['Parent/Caretaker Name'] || p['Parent/Caretaker Name'] || '',
+      'Parent Email': manual['Parent Email'] || p['Parent Email'] || '',
+      'Parent Phone': manual['Parent Phone'] || p['Parent Phone'] || '',
+      'Cohort ID': manual['Cohort ID'] || p['Cohort ID'] || '',
+      'Cohort Name': manual['Cohort Name'] || p['Cohort Name'] || '',
+      'Site': manual['Site'] || p['Site'] || '',
+      'Program Term': manual['Program Term'] || p['Program Term'] || '',
       'Neurodivergent Response': p['Neurodivergent Response'] || '',
       'Conditions/Diagnoses': p['Conditions/Diagnoses'] || '',
       'Diagnostic/Support Details': p['Diagnostic/Support Details'] || '',
@@ -903,6 +906,65 @@ function buildManualContactQueue_(screeningRows) {
     'Review Date': row['Review Date'],
     'PI Notes': row['PI Notes']
   }));
+}
+
+
+function updateParticipantCoreData(updates) {
+  updates = updates || {};
+  if (!updates.enrollmentId) throw new Error('Missing enrollmentId.');
+  const ss = getSpreadsheet_();
+  const screeningSheet = ss.getSheetByName(SHEETS.SCREENING_REVIEW);
+  const screeningRows = readObjects_(screeningSheet, CLEAN_HEADER_ROW, DATA_START_ROW);
+  const current = screeningRows.find(row => String(row['EnrollmentID']) === String(updates.enrollmentId));
+  if (!current) throw new Error(`EnrollmentID not found in Screening_Review: ${updates.enrollmentId}`);
+  const responseId = String(current['ResponseID'] || '').trim();
+  if (!responseId) throw new Error('This participant does not have a prescreening ResponseID to update.');
+
+  const screeningHeaders = screeningSheet.getRange(1, 1, 1, screeningSheet.getLastColumn()).getValues()[0].map(String);
+  const screeningRow = screeningRows.findIndex(row => String(row['EnrollmentID']) === String(updates.enrollmentId)) + DATA_START_ROW;
+  const screeningUpdates = {
+    'Child Full Name': updates.childName,
+    'Parent/Caretaker Name': updates.parentName,
+    'Parent Email': updates.parentEmail,
+    'Parent Phone': updates.parentPhone,
+    'Cohort ID': updates.cohortId,
+    'Cohort Name': updates.cohortName,
+    'Site': updates.site,
+    'Program Term': updates.programTerm
+  };
+  Object.entries(screeningUpdates).forEach(([field, value]) => {
+    if (value === undefined) return;
+    const col = screeningHeaders.indexOf(field) + 1;
+    if (col > 0) screeningSheet.getRange(screeningRow, col).setValue(value);
+  });
+
+  const rawSheet = ss.getSheetByName(SHEETS.PRESCREEN_RAW);
+  const rawHeaders = rawSheet.getRange(RAW_HEADER_ROW, 1, 1, rawSheet.getLastColumn()).getValues()[0].map(String);
+  const rawValues = rawSheet.getDataRange().getValues();
+  const responseCol = rawHeaders.findIndex(h => /response\s*id/i.test(String(h))) + 1;
+  if (responseCol < 1) throw new Error('Prescreening_Raw is missing a Response ID column.');
+  const rawRowIndex = rawValues.findIndex((row, index) => index >= RAW_DATA_START_ROW - 1 && String(row[responseCol - 1]) === responseId);
+  if (rawRowIndex < RAW_DATA_START_ROW - 1) throw new Error(`Could not find raw prescreening response ${responseId}.`);
+  const targetRow = rawRowIndex + 1;
+
+  setRawValueForAnyHeader_(rawSheet, rawHeaders, targetRow, ['Childs Name (First Last)', 'Child Full Name', 'Child Name'], updates.childName);
+  setRawValueForAnyHeader_(rawSheet, rawHeaders, targetRow, ['Parent / Caretaker Name (First Last):', 'Parent/Caretaker Name', 'Parent Name'], updates.parentName);
+  setRawValueForAnyHeader_(rawSheet, rawHeaders, targetRow, ['Email Address:', 'Parent Email', 'Respondent Email'], updates.parentEmail);
+  setRawValueForAnyHeader_(rawSheet, rawHeaders, targetRow, ['Primary Phone Number. Note that your phone number should be 10-digits and in this format. XXX-XXX-XXXX', 'Parent Phone', 'Phone'], updates.parentPhone);
+  setRawValueForAnyHeader_(rawSheet, rawHeaders, targetRow, ['Cohort ID'], updates.cohortId);
+  setRawValueForAnyHeader_(rawSheet, rawHeaders, targetRow, ['Cohort Name'], updates.cohortName);
+  setRawValueForAnyHeader_(rawSheet, rawHeaders, targetRow, ['Site'], updates.site);
+  setRawValueForAnyHeader_(rawSheet, rawHeaders, targetRow, ['Program Term'], updates.programTerm);
+
+  refreshEnrollmentTracker();
+  return buildAppDashboardData_(false);
+}
+
+function setRawValueForAnyHeader_(sheet, headers, row, possibleHeaders, value) {
+  if (value === undefined) return;
+  const normalized = possibleHeaders.map(normalizeHeaderKey_);
+  const index = headers.findIndex(h => normalized.includes(normalizeHeaderKey_(h)));
+  if (index >= 0) sheet.getRange(row, index + 1).setValue(value);
 }
 
 function updateScreeningReview(updates) {
@@ -1431,16 +1493,17 @@ function selectConsentMatch_(prescreen, consents, manualMatch) {
   const second = ranked[1];
   const closeSecond = second && best.score - second.score < 10;
   const strongIdentifier = best.reasons.some(reason => /email exact|phone exact/i.test(reason));
-  const accepted = best.score >= 80 && !closeSecond && strongIdentifier;
-  const probable = !accepted && best.score >= 60;
+  // Study-team rule: any score of 60 or higher is accepted automatically.
+  // Lower-confidence matches remain visible in Match_Review for manual approval.
+  const accepted = best.score >= 60;
   const needsReview = !accepted && best.score >= 40;
   return {
-    consent: best.consent,
+    consent: accepted ? best.consent : null,
     accepted,
-    status: accepted ? 'Matched' : (probable ? 'Probable Match - Review' : (needsReview ? 'Needs Review' : 'No Consent Yet')),
+    status: accepted ? 'Matched' : (needsReview ? 'Needs Review' : 'No Consent Yet'),
     score: best.score,
-    reasons: closeSecond ? best.reasons.concat(['Another consent record has a similar score; manual review recommended']) : best.reasons,
-    needsReview: probable || needsReview || Boolean(closeSecond),
+    reasons: closeSecond && !accepted ? best.reasons.concat(['Another consent record has a similar score; manual review recommended']) : best.reasons,
+    needsReview: needsReview || (!accepted && Boolean(closeSecond)),
     possibleMatches: ranked.slice(0, 3).map(item => describeConsentMatch_(item.consent, item.score, item.reasons)).join(' | ')
   };
 }
