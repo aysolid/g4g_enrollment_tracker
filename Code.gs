@@ -3,11 +3,12 @@
  *
  * Workflow:
  * QuestionPro webhook/manual raw import -> Prescreening_Raw/Consent_Raw audit tabs
- * -> normalized clean tabs -> Master_Enrollment -> Followup_Queue and Ready_For_DARTS.
+ * -> normalized clean tabs -> Screening_Review -> Eligible/Ineligible participant lists
+ * -> Master_Enrollment, Match_Review, Followup_Queue, and Ready_For_DARTS.
  *
- * Email automation is supervised: Apps Script drafts and approves email jobs.
- * For no-premium Outlook sending, Power Automate uses the Standard Google Sheets
- * connector bridge sheets instead of the Premium HTTP connector.
+ * Human-in-the-loop eligibility is intentional. The neurodivergent/support-needs
+ * answer is a system suggestion only; study staff make the final eligibility decision.
+ * Email automation has been removed from the active workflow.
  */
 
 const SHEETS = Object.freeze({
@@ -15,6 +16,9 @@ const SHEETS = Object.freeze({
   CONSENT_RAW: 'Consent_Raw',
   PRESCREEN_CLEAN: 'Prescreening_Clean',
   CONSENT_CLEAN: 'Consent_Clean',
+  SCREENING_REVIEW: 'Screening_Review',
+  ELIGIBLE: 'Eligible_Participants',
+  INELIGIBLE: 'Ineligible_Participants',
   MASTER: 'Master_Enrollment',
   FOLLOWUP: 'Followup_Queue',
   READY: 'Ready_For_DARTS',
@@ -27,19 +31,31 @@ const CLEAN_HEADER_ROW = 1;
 const DATA_START_ROW = 2;
 const RAW_DATA_START_ROW = 3;
 const MANUAL_FOLLOWUP_FIELDS = [
-  'Follow Up Status', 'Email Drafted', 'Email Sent Date',
-  'Follow Up Completed Date', 'Assigned To', 'Notes',
-  'Updated Support Details', 'Follow-Up Outcome', 'Eligibility Review Status',
-  'Reviewed By', 'Review Date', 'PI Notes',
-  'Email Workflow Status', 'Latest EmailJobID', 'Latest Email Type', 'Latest Email Subject',
-  'Latest Email Approved At', 'Latest Email Sent At', 'Latest Reply Received At',
-  'Reply Status', 'Reminder Status', 'Reminder Count', 'Next Reminder Date',
-  'Do Not Contact', 'Do Not Contact Reason'
+  'Manual Contact Needed', 'Manual Contact Status', 'Assigned To', 'Notes',
+  'Updated Support Details', 'Parent Response Summary', 'Eligibility Review Status',
+  'Human Eligibility Decision', 'Decision Reason', 'Reviewed By', 'Review Date', 'PI Notes'
 ];
 const FOLLOWUP_REVIEW_FIELDS = [
-  'Updated Support Details', 'Follow-Up Outcome', 'Eligibility Review Status',
-  'Reviewed By', 'Review Date', 'PI Notes'
+  'Updated Support Details', 'Parent Response Summary', 'Eligibility Review Status',
+  'Human Eligibility Decision', 'Decision Reason', 'Reviewed By', 'Review Date', 'PI Notes'
 ];
+const SCREENING_MANUAL_FIELDS = [
+  'Human Eligibility Decision', 'Decision Reason', 'Manual Contact Needed', 'Manual Contact Status',
+  'Assigned To', 'Updated Support Details', 'Parent Response Summary', 'Eligibility Review Status',
+  'Reviewed By', 'Review Date', 'PI Notes', 'Notes'
+];
+const SCREENING_REVIEW_HEADERS = [
+  'EnrollmentID', 'PrescreeningID', 'ResponseID', 'Submitted At', 'Child Full Name',
+  'Parent/Caretaker Name', 'Parent Email', 'Parent Phone', 'Cohort ID', 'Cohort Name',
+  'Site', 'Program Term', 'Neurodivergent Response', 'Conditions/Diagnoses',
+  'Diagnostic/Support Details', 'Physical Disability Supports', 'System Eligibility Suggestion',
+  'System Eligibility Reason', 'Human Eligibility Decision', 'Decision Reason',
+  'Manual Contact Needed', 'Manual Contact Status', 'Assigned To', 'Updated Support Details',
+  'Parent Response Summary', 'Eligibility Review Status', 'Reviewed By', 'Review Date',
+  'PI Notes', 'Notes', 'Last Updated'
+];
+const ELIGIBLE_PARTICIPANTS_HEADERS = SCREENING_REVIEW_HEADERS.concat(['Eligibility Approved At']);
+const INELIGIBLE_PARTICIPANTS_HEADERS = SCREENING_REVIEW_HEADERS.concat(['Eligibility Closed At']);
 const MATCH_REVIEW_SHEET = 'Match_Review';
 const UNMATCHED_CONSENT_SHEET = 'Unmatched_Consent';
 const COHORTS_SHEET = 'Cohorts';
@@ -59,69 +75,6 @@ const UNMATCHED_CONSENT_HEADERS = [
   'Consent ResponseID', 'Submitted At', 'Child Full Name', 'Parent Full Name',
   'Parent Email', 'Parent Phone', 'Consent Status', 'Best Prescreening Match',
   'Best Match Score', 'Match Reasons', 'Review Status', 'Notes'
-];
-
-const EMAIL_TEMPLATES_SHEET = 'Email_Templates';
-const EMAIL_OUTBOX_SHEET = 'Email_Outbox';
-const EMAIL_LOG_SHEET = 'Email_Log';
-const REPLY_LOG_SHEET = 'Reply_Log';
-const REMINDER_QUEUE_SHEET = 'Reminder_Queue';
-const POWER_AUTOMATE_CONFIG_SHEET = 'Power_Automate_Config';
-const PA_EMAIL_OUTBOX_SHEET = 'PA_Email_Outbox';
-const PA_EMAIL_STATUS_SHEET = 'PA_Email_Status';
-const PA_REPLY_INBOX_SHEET = 'PA_Reply_Inbox';
-const EMAIL_TEMPLATE_HEADERS = [
-  'TemplateID', 'Template Name', 'Email Type', 'Subject Template', 'Body Template',
-  'Active', 'Requires Approval', 'Approved By', 'Approved Date', 'Last Updated', 'Notes'
-];
-const EMAIL_OUTBOX_HEADERS = [
-  'EmailJobID', 'EnrollmentID', 'PrescreeningID', 'ConsentID', 'Child Full Name',
-  'Parent/Caretaker Name', 'Parent Email', 'Parent Phone', 'Cohort ID', 'Cohort Name',
-  'Site', 'Program Term', 'Email Type', 'TemplateID', 'Email Subject', 'Email Body',
-  'Email Body HTML', 'Approval Status', 'Approved By', 'Approved At', 'Send Status',
-  'Scheduled Send At', 'Sent At', 'Power Automate Run ID', 'Power Automate Status',
-  'Retry Count', 'Last Attempt At', 'Error Message', 'Created At', 'Updated At',
-  'Do Not Send', 'Notes'
-];
-const EMAIL_LOG_HEADERS = [
-  'LogID', 'Timestamp', 'EmailJobID', 'EnrollmentID', 'Parent Email', 'Child Full Name',
-  'Email Type', 'Subject', 'Action', 'Status', 'Sent By / Mailbox',
-  'Power Automate Run ID', 'Error Message', 'Raw Response'
-];
-const REPLY_LOG_HEADERS = [
-  'ReplyID', 'EmailJobID', 'EnrollmentID', 'Parent Email', 'From Name', 'From Address',
-  'Subject', 'Received At', 'Reply Preview', 'Reply Body', 'Has Attachments',
-  'Power Automate Message ID', 'Follow Up Status Before Reply', 'Follow Up Status After Reply',
-  'Reviewed By', 'Reviewed At', 'Notes'
-];
-const REMINDER_QUEUE_HEADERS = [
-  'ReminderID', 'EmailJobID', 'EnrollmentID', 'Reminder Number', 'Reminder Type',
-  'Scheduled Send At', 'Approval Status', 'Send Status', 'Sent At',
-  'Power Automate Run ID', 'Error Message', 'Created At', 'Notes'
-];
-const POWER_AUTOMATE_CONFIG_HEADERS = ['Setting', 'Value', 'Notes'];
-const PA_EMAIL_OUTBOX_HEADERS = [
-  'email_job_id', 'enrollment_id', 'parent_email', 'parent_name', 'parent_phone',
-  'child_name', 'cohort_id', 'cohort_name', 'site', 'program_term',
-  'email_type', 'template_id', 'subject', 'body_text', 'body_html',
-  'approval_status', 'send_status', 'scheduled_send_at', 'sent_at',
-  'do_not_send', 'retry_count', 'last_attempt_at', 'error_message',
-  'power_automate_run_id', 'reply_status', 'created_at', 'updated_at', 'notes'
-];
-const PA_EMAIL_STATUS_HEADERS = [
-  'status_id', 'email_job_id', 'enrollment_id', 'status', 'sent_at',
-  'attempted_at', 'run_id', 'error_message', 'raw_response', 'processed_at'
-];
-const PA_REPLY_INBOX_HEADERS = [
-  'reply_id', 'email_job_id', 'enrollment_id', 'parent_email', 'from_name',
-  'from_address', 'subject', 'received_at', 'body_preview', 'body_text',
-  'message_id', 'has_attachments', 'raw_response', 'processed_at', 'notes'
-];
-const EMAIL_FOLLOWUP_FIELDS = [
-  'Email Workflow Status', 'Latest EmailJobID', 'Latest Email Type', 'Latest Email Subject',
-  'Latest Email Approved At', 'Latest Email Sent At', 'Latest Reply Received At',
-  'Reply Status', 'Reminder Status', 'Reminder Count', 'Next Reminder Date',
-  'Do Not Contact', 'Do Not Contact Reason'
 ];
 
 function getSpreadsheet_() {
@@ -148,8 +101,6 @@ function onOpen() {
     .addItem('Open professor dashboard', 'showProfessorDashboard')
     .addItem('Refresh tracker from raw tabs', 'refreshEnrollmentTracker')
     .addItem('Install raw-tab automation', 'installRawTabAutomation')
-    .addItem('Initialize email workflow sheets', 'initializeEmailWorkflow')
-    .addItem('Sync no-premium Outlook bridge sheets', 'syncNoPremiumOutlookBridge')
     .addItem('Rebuild dashboard counts', 'refreshDashboard')
     .addSeparator()
     .addItem('Run self-test with sample rows', 'runPhaseOneSelfTest')
@@ -177,9 +128,12 @@ function getTrackerSummary() {
     spreadsheetName: ss.getName(),
     prescreening: countRows_(ss, SHEETS.PRESCREEN_CLEAN),
     consent: countRows_(ss, SHEETS.CONSENT_CLEAN),
+    screeningReview: countRows_(ss, SHEETS.SCREENING_REVIEW),
+    eligible: countRows_(ss, SHEETS.ELIGIBLE),
+    ineligible: countRows_(ss, SHEETS.INELIGIBLE),
     master: countRows_(ss, SHEETS.MASTER),
-    followupNeeded: countWhere_(ss, SHEETS.MASTER, 'Follow Up Needed', 'Yes'),
-    followupCompleted: countWhere_(ss, SHEETS.FOLLOWUP, 'Follow Up Status', 'Completed'),
+    followupNeeded: countWhere_(ss, SHEETS.SCREENING_REVIEW, 'Manual Contact Needed', 'Yes'),
+    followupCompleted: countWhere_(ss, SHEETS.SCREENING_REVIEW, 'Manual Contact Status', 'Completed'),
     readyForDarts: countWhere_(ss, SHEETS.MASTER, 'Ready for DARTS', 'Yes'),
     generatedAt: new Date().toISOString(),
     webAppUrl: getWebAppUrl_(),
@@ -242,7 +196,6 @@ function buildWebhookUrl_(formType, cohort) {
 /** Serves the deployed web app URL. This prevents "Script function not found: doGet". */
 function doGet(e) {
   const action = String(e && e.parameter && e.parameter.action || '').toLowerCase();
-  if (action === 'email_jobs') return jsonResponse_({ok: true, jobs: getApprovedEmailJobsForPowerAutomate(e && e.parameter && e.parameter.secret)});
   const view = String(e && e.parameter && e.parameter.view || 'dashboard').toLowerCase();
   if (view === 'sidebar') {
     return HtmlService.createHtmlOutputFromFile('Sidebar')
@@ -264,7 +217,7 @@ function safeGetAppDashboardData_() {
   try {
     return getAppDashboardData();
   } catch (err) {
-    return {generatedAt: new Date().toISOString(), error: String(err), metrics: {}, participants: [], followups: [], ready: [], needsReview: [], matchReview: [], unmatchedConsents: [], prescreens: [], consents: [], dashboardRows: [], activity: [], reports: {actionItems: []}, urls: {}, setup: {error: String(err)}};
+    return {generatedAt: new Date().toISOString(), error: String(err), metrics: {}, participants: [], screening: [], eligibleParticipants: [], ineligibleParticipants: [], followups: [], ready: [], needsReview: [], matchReview: [], unmatchedConsents: [], prescreens: [], consents: [], dashboardRows: [], activity: [], reports: {actionItems: []}, urls: {}, setup: {error: String(err)}};
   }
 }
 
@@ -273,8 +226,6 @@ function doPost(e) {
   try {
     const payload = parseWebhookPayload_(e);
     const action = String((e && e.parameter && e.parameter.action) || payload.action || '').toLowerCase();
-    if (action === 'email_status') return jsonResponse_(receivePowerAutomateSendUpdate_(payload));
-    if (action === 'email_reply') return jsonResponse_(receivePowerAutomateReply_(payload));
     const formType = getRequestedFormType_(e, payload) || detectFormType_(payload);
     const cohort = getRequestedCohort_(e, payload);
     appendRawPayload_(formType, payload, cohort);
@@ -295,7 +246,7 @@ function refreshEnrollmentTracker() {
   ensureMasterMatchColumns_(ss);
   ensureAuxiliaryMatchSheets_(ss);
   ensureCohortInfrastructure_(ss);
-  ensureEmailWorkflowInfrastructure_(ss);
+  ensureScreeningInfrastructure_(ss);
 
   const prescreenRawSheet = ss.getSheetByName(SHEETS.PRESCREEN_RAW);
   const consentRawSheet = ss.getSheetByName(SHEETS.CONSENT_RAW);
@@ -311,21 +262,30 @@ function refreshEnrollmentTracker() {
   writeTable_(ss.getSheetByName(SHEETS.PRESCREEN_CLEAN), prescreenClean, 'ResponseID');
   writeTable_(ss.getSheetByName(SHEETS.CONSENT_CLEAN), consentClean, 'ResponseID');
 
-  const manualFollowupByEnrollment = readManualFollowupState_(ss.getSheetByName(SHEETS.FOLLOWUP));
+  const manualScreeningByEnrollment = readManualScreeningState_(ss.getSheetByName(SHEETS.SCREENING_REVIEW));
+  const legacyFollowupByEnrollment = readManualFollowupState_(ss.getSheetByName(SHEETS.FOLLOWUP));
+  const screeningReview = buildScreeningReview_(prescreenClean, manualScreeningByEnrollment, legacyFollowupByEnrollment);
+  writeTable_(ss.getSheetByName(SHEETS.SCREENING_REVIEW), screeningReview, 'EnrollmentID');
+
+  const eligible = buildEligibleParticipants_(screeningReview);
+  const ineligible = buildIneligibleParticipants_(screeningReview);
+  writeTable_(ss.getSheetByName(SHEETS.ELIGIBLE), eligible, 'EnrollmentID');
+  writeTable_(ss.getSheetByName(SHEETS.INELIGIBLE), ineligible, 'EnrollmentID');
+
   const manualMatchByEnrollment = readManualMatchState_(ss.getSheetByName(SHEETS.MASTER));
-  const master = buildMasterEnrollment_(prescreenClean, consentClean, manualFollowupByEnrollment, config, manualMatchByEnrollment);
+  const master = buildMasterEnrollment_(eligible, consentClean, config, manualMatchByEnrollment);
   writeTable_(ss.getSheetByName(SHEETS.MASTER), master, 'EnrollmentID');
 
   const matchReview = buildMatchReview_(master);
   writeTable_(ss.getSheetByName(MATCH_REVIEW_SHEET), matchReview, 'EnrollmentID');
 
-  const unmatchedConsent = buildUnmatchedConsent_(prescreenClean, consentClean, master);
+  const unmatchedConsent = buildUnmatchedConsent_(eligible, consentClean, master);
   writeTable_(ss.getSheetByName(UNMATCHED_CONSENT_SHEET), unmatchedConsent, 'Consent ResponseID');
 
-  const followupQueue = buildFollowupQueue_(master, prescreenClean, manualFollowupByEnrollment, config);
+  const followupQueue = buildManualContactQueue_(screeningReview);
   writeTable_(ss.getSheetByName(SHEETS.FOLLOWUP), followupQueue, 'EnrollmentID');
 
-  const ready = buildReadyForDarts_(master, prescreenClean, consentClean);
+  const ready = buildReadyForDarts_(master, eligible, consentClean);
   writeTable_(ss.getSheetByName(SHEETS.READY), ready, 'EnrollmentID');
   refreshDashboard();
   rememberRawTabSignatures_(ss);
@@ -350,11 +310,9 @@ function refreshAppDashboardData() {
 }
 
 function buildAppDashboardData_(shouldRefresh) {
-  // Intentionally do not rebuild workbook tabs from the web app.
-  // QuestionPro/webhook processing and manual workbook refreshes update the Sheet database.
-  // The dashboard only reads the current Sheet state so it cannot wipe or reset displayed data.
+  // The dashboard is read-only against the current workbook state.
+  // Pipeline rebuilds happen from webhooks, the sidebar/menu, or installed raw-tab triggers.
   const ss = getSpreadsheet_();
-  ensureEmailWorkflowInfrastructure_(ss);
   const professor = buildProfessorDashboardData_(false);
   const dashboardRows = readDashboardMetricRows_(ss);
   const matchReview = readObjectsOrEmpty_(ss, MATCH_REVIEW_SHEET);
@@ -364,20 +322,18 @@ function buildAppDashboardData_(shouldRefresh) {
   const master = readObjectsOrEmpty_(ss, SHEETS.MASTER);
   const followups = readObjectsOrEmpty_(ss, SHEETS.FOLLOWUP);
   const ready = readObjectsOrEmpty_(ss, SHEETS.READY);
-  const emailTemplates = readObjectsOrEmpty_(ss, EMAIL_TEMPLATES_SHEET);
-  const emailOutbox = readObjectsOrEmpty_(ss, EMAIL_OUTBOX_SHEET);
-  const emailLog = readObjectsOrEmpty_(ss, EMAIL_LOG_SHEET);
-  const replyLog = readObjectsOrEmpty_(ss, REPLY_LOG_SHEET);
-  const reminderQueue = readObjectsOrEmpty_(ss, REMINDER_QUEUE_SHEET);
-  const paEmailOutbox = readObjectsOrEmpty_(ss, PA_EMAIL_OUTBOX_SHEET);
-  const paEmailStatus = readObjectsOrEmpty_(ss, PA_EMAIL_STATUS_SHEET);
-  const paReplyInbox = readObjectsOrEmpty_(ss, PA_REPLY_INBOX_SHEET);
+  const screening = readObjectsOrEmpty_(ss, SHEETS.SCREENING_REVIEW);
+  const eligibleParticipants = readObjectsOrEmpty_(ss, SHEETS.ELIGIBLE);
+  const ineligibleParticipants = readObjectsOrEmpty_(ss, SHEETS.INELIGIBLE);
   const payload = {
     generatedAt: new Date().toISOString(),
     spreadsheetName: ss.getName(),
-    metrics: buildCommandCenterMetrics_(professor.summary, dashboardRows, matchReview, unmatchedConsents),
+    metrics: buildCommandCenterMetrics_(professor.summary, dashboardRows, matchReview, unmatchedConsents, screening, eligibleParticipants, ineligibleParticipants),
     dashboardRows,
     participants: professor.participants,
+    screening,
+    eligibleParticipants,
+    ineligibleParticipants,
     followups: professor.followups,
     needsReview: professor.needsReview,
     ready: professor.ready,
@@ -387,21 +343,12 @@ function buildAppDashboardData_(shouldRefresh) {
     consents,
     master,
     cohorts: buildCohortSummaries_(ss, professor.participants, prescreens, consents),
-    emailTemplates,
-    emailOutbox,
-    emailLog,
-    replyLog,
-    reminderQueue,
-    paEmailOutbox,
-    paEmailStatus,
-    paReplyInbox,
-    emailMetrics: buildEmailMetrics_(emailOutbox, emailLog, replyLog, reminderQueue),
     rawCounts: {
       prescreening: readRawRows_(ss.getSheetByName(SHEETS.PRESCREEN_RAW)).length,
       consent: readRawRows_(ss.getSheetByName(SHEETS.CONSENT_RAW)).length
     },
-    activity: buildActivityFeed_(prescreens, consents, followups, matchReview, unmatchedConsents, emailOutbox, replyLog),
-    reports: buildReportData_(professor.participants, followups, matchReview, unmatchedConsents, ready, emailOutbox, replyLog, reminderQueue),
+    activity: buildActivityFeed_(prescreens, consents, followups, matchReview, unmatchedConsents, screening),
+    reports: buildReportData_(professor.participants, followups, matchReview, unmatchedConsents, ready, screening, eligibleParticipants, ineligibleParticipants),
     setup: getSheetSetupStatus_(),
     urls: {
       webApp: getWebAppUrl_(),
@@ -411,6 +358,7 @@ function buildAppDashboardData_(shouldRefresh) {
   };
   return jsonSafe_(payload);
 }
+
 
 function readObjectsOrEmpty_(ss, sheetName) {
   const sheet = ss.getSheetByName(sheetName);
@@ -428,15 +376,19 @@ function readDashboardMetricRows_(ss) {
   }));
 }
 
-function buildCommandCenterMetrics_(summary, dashboardRows, matchReview, unmatchedConsents) {
+function buildCommandCenterMetrics_(summary, dashboardRows, matchReview, unmatchedConsents, screening, eligible, ineligible) {
   const metricMap = new Map(dashboardRows.map(row => [row.metric, row.value]));
   return {
     prescreened: metricMap.get('Total Prescreening Submitted') || summary.prescreened || 0,
     consentSubmitted: metricMap.get('Total Consent Submitted') || summary.consentSubmitted || 0,
     masterRecords: metricMap.get('Total Master Enrollment Records') || summary.masterRecords || 0,
+    screeningPending: (screening || []).filter(row => !row['Human Eligibility Decision'] || row['Human Eligibility Decision'] === 'Pending Review').length,
+    eligibleApproved: (eligible || []).length,
+    ineligible: (ineligible || []).length,
     neurodivergentYes: summary.neurodivergentYes || 0,
-    followUpNeeded: metricMap.get('Follow Up Needed') || summary.followUpNeeded || 0,
-    followUpCompleted: metricMap.get('Follow Up Completed') || summary.followUpCompleted || 0,
+    neurodivergentNo: summary.neurodivergentNo || 0,
+    manualContactNeeded: metricMap.get('Manual Contact Needed') || summary.followUpNeeded || 0,
+    manualContactCompleted: metricMap.get('Manual Contact Completed') || summary.followUpCompleted || 0,
     consentCompleted: metricMap.get('Consent Completed') || summary.consentCompleted || 0,
     readyForDarts: metricMap.get('Ready for DARTS') || summary.readyForDarts || 0,
     needsReview: metricMap.get('Needs Review') || summary.needsReview || 0,
@@ -445,41 +397,38 @@ function buildCommandCenterMetrics_(summary, dashboardRows, matchReview, unmatch
   };
 }
 
-function buildActivityFeed_(prescreens, consents, followups, matchReview, unmatchedConsents, emailOutbox, replyLog) {
+function buildActivityFeed_(prescreens, consents, followups, matchReview, unmatchedConsents, screening) {
   const items = [];
   prescreens.slice(-8).forEach(row => items.push({type: 'Prescreening', title: row['Child Full Name'] || 'Prescreening submitted', detail: row['Parent Email'] || row['Parent/Caretaker Name'] || '', when: row['Submitted At'] || ''}));
   consents.slice(-8).forEach(row => items.push({type: 'Consent', title: row['Child Full Name'] || 'Consent submitted', detail: row['Parent Email'] || row['Parent Full Name'] || '', when: row['Submitted At'] || ''}));
-  followups.filter(row => row['Follow Up Status'] && row['Follow Up Status'] !== 'Not Started').slice(-8).forEach(row => items.push({type: 'Follow-Up', title: row['Child Full Name'] || row['EnrollmentID'], detail: row['Follow Up Status'], when: row['Follow Up Completed Date'] || row['Email Sent Date'] || ''}));
+  (screening || []).filter(row => row['Human Eligibility Decision'] && row['Human Eligibility Decision'] !== 'Pending Review').slice(-8).forEach(row => items.push({type: 'Eligibility', title: row['Child Full Name'] || row['EnrollmentID'], detail: row['Human Eligibility Decision'], when: row['Review Date'] || row['Last Updated'] || ''}));
+  followups.filter(row => row['Follow Up Status'] && row['Follow Up Status'] !== 'Not Started').slice(-8).forEach(row => items.push({type: 'Manual Contact', title: row['Child Full Name'] || row['EnrollmentID'], detail: row['Follow Up Status'], when: row['Review Date'] || ''}));
   matchReview.slice(-8).forEach(row => items.push({type: 'Match Review', title: row['Child Full Name'] || row['EnrollmentID'], detail: row['Match Status'] || 'Needs Review', when: row['Last Updated'] || ''}));
-  unmatchedConsents.slice(-8).forEach(row => items.push({type: 'Unmatched Consent', title: row['Child Full Name'] || row['Consent ResponseID'], detail: row['Best Prescreening Match'] || 'No confident match', when: row['Submitted At'] || ''}));
-  (emailOutbox || []).slice(-8).forEach(row => items.push({type: 'Email', title: row['Child Full Name'] || row['EmailJobID'], detail: `${row['Email Type'] || 'Email'} • ${row['Send Status'] || row['Approval Status'] || ''}`, when: row['Updated At'] || row['Created At'] || ''}));
-  (replyLog || []).slice(-8).forEach(row => items.push({type: 'Reply', title: row['Child Full Name'] || row['EnrollmentID'], detail: row['Reply Preview'] || row['Subject'] || '', when: row['Received At'] || ''}));
+  unmatchedConsents.slice(-8).forEach(row => items.push({type: 'Unmatched Consent', title: row['Child Full Name'] || row['Consent ResponseID'], detail: row['Best Prescreening Match'] || 'No eligible prescreening match', when: row['Submitted At'] || ''}));
   return items.sort((a, b) => String(b.when || '').localeCompare(String(a.when || ''))).slice(0, 15);
 }
 
-function buildReportData_(participants, followups, matchReview, unmatchedConsents, ready, emailOutbox, replyLog, reminderQueue) {
+function buildReportData_(participants, followups, matchReview, unmatchedConsents, ready, screening, eligible, ineligible) {
   return {
-    followupStatus: groupCounts_(followups, 'Follow Up Status'),
+    contactStatus: groupCounts_(followups, 'Follow Up Status'),
     consentStatus: groupCounts_(participants, 'consentStatus'),
     readiness: groupCounts_(participants, 'readyForDarts'),
     matchStatus: groupCounts_(participants, 'matchStatus'),
     reviewStatus: groupCounts_(participants, 'eligibilityReviewStatus'),
-    emailSendStatus: groupCounts_(emailOutbox || [], 'Send Status'),
-    emailApprovalStatus: groupCounts_(emailOutbox || [], 'Approval Status'),
-    replyStatus: groupCounts_(replyLog || [], 'Follow Up Status After Reply'),
-    reminderStatus: groupCounts_(reminderQueue || [], 'Send Status'),
+    humanEligibilityDecision: groupCounts_(participants, 'humanEligibilityDecision'),
+    systemEligibilitySuggestion: groupCounts_(participants, 'systemEligibilitySuggestion'),
     actionItems: [
-      {label: 'Follow-ups not started', value: followups.filter(row => !row['Follow Up Status'] || row['Follow Up Status'] === 'Not Started').length},
-      {label: 'Follow-ups awaiting response', value: followups.filter(row => row['Follow Up Status'] === 'Awaiting Response').length},
+      {label: 'Eligibility pending review', value: (screening || []).filter(row => !row['Human Eligibility Decision'] || row['Human Eligibility Decision'] === 'Pending Review').length},
+      {label: 'Needs more information', value: (screening || []).filter(row => row['Human Eligibility Decision'] === 'Needs More Information').length},
+      {label: 'Approved eligible', value: (eligible || []).length},
+      {label: 'Marked ineligible', value: (ineligible || []).length},
       {label: 'Match review needed', value: matchReview.length},
       {label: 'Unmatched consent records', value: unmatchedConsents.length},
-      {label: 'Ready for DARTS export', value: ready.length},
-      {label: 'Emails pending approval', value: (emailOutbox || []).filter(row => row['Approval Status'] === 'Pending Approval').length},
-      {label: 'Email send failures', value: (emailOutbox || []).filter(row => row['Send Status'] === 'Failed').length},
-      {label: 'Parent replies needing review', value: (replyLog || []).filter(row => !row['Reviewed At']).length}
+      {label: 'Ready for DARTS export', value: ready.length}
     ]
   };
 }
+
 
 function groupCounts_(rows, field) {
   return rows.reduce((acc, row) => {
@@ -517,75 +466,85 @@ function approveConsentMatch(update) {
 function buildProfessorDashboardData_(shouldRefresh) {
   if (shouldRefresh) refreshEnrollmentTracker();
   const ss = getSpreadsheet_();
-  const master = readObjects_(ss.getSheetByName(SHEETS.MASTER), CLEAN_HEADER_ROW, DATA_START_ROW);
-  const followups = readObjects_(ss.getSheetByName(SHEETS.FOLLOWUP), CLEAN_HEADER_ROW, DATA_START_ROW);
-  const prescreens = readObjects_(ss.getSheetByName(SHEETS.PRESCREEN_CLEAN), CLEAN_HEADER_ROW, DATA_START_ROW);
-  const consents = readObjects_(ss.getSheetByName(SHEETS.CONSENT_CLEAN), CLEAN_HEADER_ROW, DATA_START_ROW);
-  const ready = readObjects_(ss.getSheetByName(SHEETS.READY), CLEAN_HEADER_ROW, DATA_START_ROW);
-  const followupById = new Map(followups.map(row => [String(row['EnrollmentID'] || ''), row]));
-  const prescreenByResponse = new Map(prescreens.map(row => [String(row['ResponseID'] || ''), row]));
-  const consentByResponse = new Map(consents.map(row => [String(row['ResponseID'] || ''), row]));
-  const sourceRecords = master.length ? master : prescreens.map(row => masterLikeFromPrescreen_(row));
+  const master = readObjectsOrEmpty_(ss, SHEETS.MASTER);
+  const screening = readObjectsOrEmpty_(ss, SHEETS.SCREENING_REVIEW);
+  const eligible = readObjectsOrEmpty_(ss, SHEETS.ELIGIBLE);
+  const ineligible = readObjectsOrEmpty_(ss, SHEETS.INELIGIBLE);
+  const prescreens = readObjectsOrEmpty_(ss, SHEETS.PRESCREEN_CLEAN);
+  const consents = readObjectsOrEmpty_(ss, SHEETS.CONSENT_CLEAN);
+  const ready = readObjectsOrEmpty_(ss, SHEETS.READY);
+  const masterById = new Map(master.map(row => [String(row['EnrollmentID'] || ''), row]));
+  const sourceRecords = screening.length ? screening : prescreens.map(row => screeningLikeFromPrescreen_(row));
   const participants = sourceRecords.map(row => {
-    const followup = followupById.get(String(row['EnrollmentID'] || '')) || {};
-    const prescreen = prescreenByResponse.get(String(row['Prescreening ResponseID'] || '')) || {};
-    const consent = consentByResponse.get(String(row['Consent ResponseID'] || '')) || {};
-    return {
-      enrollmentId: row['EnrollmentID'] || '',
-      childName: row['Child Full Name'] || '',
-      parentName: row['Parent/Caretaker Name'] || '',
-      parentEmail: row['Parent Email'] || '',
-      parentPhone: row['Parent Phone'] || '',
-      cohortId: row['Cohort ID'] || prescreen['Cohort ID'] || consent['Cohort ID'] || '',
-      cohortName: row['Cohort Name'] || prescreen['Cohort Name'] || consent['Cohort Name'] || '',
-      site: row['Site'] || prescreen['Site'] || consent['Site'] || '',
-      programTerm: row['Program Term'] || prescreen['Program Term'] || consent['Program Term'] || '',
-      grade: prescreen['Child Grade'] || consent['Grade'] || '',
-      prescreeningStatus: row['Prescreening Status'] || '',
-      consentStatus: row['Consent Status'] || '',
-      neurodivergentResponse: row['Neurodivergent Response'] || '',
-      conditions: followup['Conditions/Diagnoses'] || prescreen['Conditions/Diagnoses'] || '',
-      supportDetails: followup['Updated Support Details'] || followup['Support Details'] || prescreen['Diagnostic/Support Details'] || '',
-      originalSupportDetails: followup['Support Details'] || prescreen['Diagnostic/Support Details'] || '',
-      updatedSupportDetails: followup['Updated Support Details'] || '',
-      physicalSupports: followup['Physical Disability Supports'] || prescreen['Physical Disability Supports'] || '',
-      followUpNeeded: row['Follow Up Needed'] || '',
-      followUpStatus: row['Follow Up Status'] || '',
-      emailDrafted: followup['Email Drafted'] || '',
-      emailSentDate: followup['Email Sent Date'] || '',
-      followUpCompletedDate: followup['Follow Up Completed Date'] || '',
-      assignedTo: followup['Assigned To'] || '',
-      followUpOutcome: followup['Follow-Up Outcome'] || '',
-      eligibilityReviewStatus: followup['Eligibility Review Status'] || deriveReviewStatus_(row, followup, prescreen),
-      matchStatus: row['Match Status'] || '',
-      matchConfidenceScore: row['Match Confidence Score'] || '',
-      matchReasons: row['Match Reasons'] || '',
-      needsMatchReview: row['Needs Match Review'] || '',
-      possibleConsentMatches: row['Possible Consent Matches'] || '',
-      reviewedBy: followup['Reviewed By'] || '',
-      reviewDate: followup['Review Date'] || '',
-      piNotes: followup['PI Notes'] || '',
-      notes: followup['Notes'] || row['Notes'] || '',
-      enrollmentStatus: row['Enrollment Status'] || '',
-      readyForDarts: row['Ready for DARTS'] || '',
-      lastUpdated: row['Last Updated'] || ''
-    };
+    const masterRow = masterById.get(String(row['EnrollmentID'] || '')) || {};
+    return participantFromScreening_(row, masterRow);
   });
   return {
     generatedAt: new Date().toISOString(),
-    summary: buildProfessorSummary_(participants, prescreens, consents, ready, ss),
+    summary: buildProfessorSummary_(participants, prescreens, consents, ready, ss, master, eligible, ineligible),
     participants,
-    followups: participants.filter(p => p.followUpNeeded === 'Yes'),
+    screening,
+    eligibleParticipants: eligible,
+    ineligibleParticipants: ineligible,
+    followups: participants.filter(p => p.manualContactNeeded === 'Yes' || p.humanEligibilityDecision === 'Needs More Information'),
     ready: participants.filter(p => p.readyForDarts === 'Yes'),
-    needsReview: participants.filter(p => p.eligibilityReviewStatus === 'Needs Review' || p.readyForDarts === 'Review')
+    needsReview: participants.filter(p => ['Pending Review', 'Needs More Information'].includes(p.humanEligibilityDecision) || p.eligibilityReviewStatus === 'Needs Review' || p.readyForDarts === 'Review')
+  };
+}
+
+function participantFromScreening_(row, masterRow) {
+  return {
+    enrollmentId: row['EnrollmentID'] || masterRow['EnrollmentID'] || '',
+    childName: row['Child Full Name'] || masterRow['Child Full Name'] || '',
+    parentName: row['Parent/Caretaker Name'] || masterRow['Parent/Caretaker Name'] || '',
+    parentEmail: row['Parent Email'] || masterRow['Parent Email'] || '',
+    parentPhone: row['Parent Phone'] || masterRow['Parent Phone'] || '',
+    cohortId: row['Cohort ID'] || masterRow['Cohort ID'] || '',
+    cohortName: row['Cohort Name'] || masterRow['Cohort Name'] || '',
+    site: row['Site'] || masterRow['Site'] || '',
+    programTerm: row['Program Term'] || masterRow['Program Term'] || '',
+    prescreeningStatus: 'Completed',
+    consentStatus: masterRow['Consent Status'] || 'Pending',
+    neurodivergentResponse: row['Neurodivergent Response'] || masterRow['Neurodivergent Response'] || '',
+    conditions: row['Conditions/Diagnoses'] || '',
+    supportDetails: row['Updated Support Details'] || row['Diagnostic/Support Details'] || '',
+    originalSupportDetails: row['Diagnostic/Support Details'] || '',
+    updatedSupportDetails: row['Updated Support Details'] || '',
+    physicalSupports: row['Physical Disability Supports'] || '',
+    systemEligibilitySuggestion: row['System Eligibility Suggestion'] || '',
+    systemEligibilityReason: row['System Eligibility Reason'] || '',
+    humanEligibilityDecision: row['Human Eligibility Decision'] || 'Pending Review',
+    decisionReason: row['Decision Reason'] || '',
+    manualContactNeeded: row['Manual Contact Needed'] || 'No',
+    manualContactStatus: row['Manual Contact Status'] || 'Not Needed',
+    followUpNeeded: row['Manual Contact Needed'] || masterRow['Follow Up Needed'] || 'No',
+    followUpStatus: row['Manual Contact Status'] || masterRow['Follow Up Status'] || 'Not Needed',
+    assignedTo: row['Assigned To'] || '',
+    parentResponseSummary: row['Parent Response Summary'] || '',
+    eligibilityReviewStatus: row['Eligibility Review Status'] || '',
+    matchStatus: masterRow['Match Status'] || 'No Consent Yet',
+    matchConfidenceScore: masterRow['Match Confidence Score'] || 0,
+    matchReasons: masterRow['Match Reasons'] || '',
+    needsMatchReview: masterRow['Needs Match Review'] || 'No',
+    possibleConsentMatches: masterRow['Possible Consent Matches'] || '',
+    reviewedBy: row['Reviewed By'] || '',
+    reviewDate: row['Review Date'] || '',
+    piNotes: row['PI Notes'] || '',
+    notes: row['Notes'] || masterRow['Notes'] || '',
+    enrollmentStatus: masterRow['Enrollment Status'] || row['Eligibility Review Status'] || '',
+    readyForDarts: masterRow['Ready for DARTS'] || 'No',
+    lastUpdated: row['Last Updated'] || masterRow['Last Updated'] || ''
   };
 }
 
 
-function masterLikeFromPrescreen_(prescreen) {
-  const followNeeded = prescreen['Follow Up Needed'] || 'No';
+function screeningLikeFromPrescreen_(prescreen) {
+  const suggestion = systemEligibilitySuggestion_(prescreen);
   return {
     'EnrollmentID': enrollmentIdFor_(prescreen),
+    'PrescreeningID': prescreen['PrescreeningID'] || '',
+    'ResponseID': prescreen['ResponseID'] || '',
+    'Submitted At': prescreen['Submitted At'] || '',
     'Child Full Name': prescreen['Child Full Name'] || '',
     'Parent/Caretaker Name': prescreen['Parent/Caretaker Name'] || '',
     'Parent Email': prescreen['Parent Email'] || '',
@@ -594,36 +553,34 @@ function masterLikeFromPrescreen_(prescreen) {
     'Cohort Name': prescreen['Cohort Name'] || '',
     'Site': prescreen['Site'] || '',
     'Program Term': prescreen['Program Term'] || '',
-    'Prescreening Status': prescreen['Response Status'] || 'Completed',
-    'Consent Status': 'Pending',
     'Neurodivergent Response': prescreen['Neurodivergent Response'] || '',
-    'Follow Up Needed': followNeeded,
-    'Follow Up Status': followNeeded === 'Yes' ? (prescreen['Follow Up Status'] || 'Not Started') : 'Not Needed',
-    'Enrollment Status': 'In Progress',
-    'Ready for DARTS': 'No',
-    'Prescreening ResponseID': prescreen['ResponseID'] || '',
-    'Consent ResponseID': '',
-    'Match Status': 'No Consent Yet',
-    'Match Confidence Score': 0,
-    'Match Reasons': '',
-    'Needs Match Review': 'No',
-    'Possible Consent Matches': '',
-    'Manual Consent ResponseID': '',
-    'Manual Match Notes': '',
+    'Conditions/Diagnoses': prescreen['Conditions/Diagnoses'] || '',
+    'Diagnostic/Support Details': prescreen['Diagnostic/Support Details'] || '',
+    'Physical Disability Supports': prescreen['Physical Disability Supports'] || '',
+    'System Eligibility Suggestion': suggestion,
+    'System Eligibility Reason': systemEligibilityReason_(prescreen, suggestion),
+    'Human Eligibility Decision': 'Pending Review',
+    'Decision Reason': '',
+    'Manual Contact Needed': contactNeededForDecision_('Pending Review', prescreen),
+    'Manual Contact Status': 'Not Started',
+    'Eligibility Review Status': screeningStatusForDecision_('Pending Review', suggestion),
     'Last Updated': prescreen['Submitted At'] || ''
   };
 }
 
-function buildProfessorSummary_(participants, prescreens, consents, ready, ss) {
+
+function buildProfessorSummary_(participants, prescreens, consents, ready, ss, master, eligible, ineligible) {
   const computed = {
     prescreened: prescreens.length,
     consentSubmitted: consents.length,
     consentCompleted: consents.filter(row => row['Consent Status'] === 'Completed').length,
-    masterRecords: participants.length,
+    masterRecords: (master || []).length,
     neurodivergentYes: participants.filter(p => p.neurodivergentResponse === 'Yes').length,
     neurodivergentNo: participants.filter(p => p.neurodivergentResponse === 'No').length,
-    followUpNeeded: participants.filter(p => p.followUpNeeded === 'Yes').length,
-    followUpCompleted: participants.filter(p => p.followUpStatus === 'Completed').length,
+    eligibleApproved: (eligible || []).length,
+    ineligible: (ineligible || []).length,
+    followUpNeeded: participants.filter(p => p.manualContactNeeded === 'Yes' || p.followUpNeeded === 'Yes').length,
+    followUpCompleted: participants.filter(p => p.manualContactStatus === 'Completed' || p.followUpStatus === 'Completed').length,
     readyForDarts: ready.length,
     needsReview: participants.filter(p => p.eligibilityReviewStatus === 'Needs Review' || p.readyForDarts === 'Review').length
   };
@@ -669,7 +626,7 @@ function updateFollowupReview(updates) {
   const values = sheet.getDataRange().getValues();
   const targetRow = values.findIndex((row, index) => index > 0 && String(row[idCol - 1]) === String(updates.enrollmentId)) + 1;
   if (targetRow < 2) throw new Error(`EnrollmentID not found in Followup_Queue: ${updates.enrollmentId}`);
-  const allowed = ['Follow Up Status', 'Email Drafted', 'Email Sent Date', 'Follow Up Completed Date', 'Assigned To', 'Notes', ...FOLLOWUP_REVIEW_FIELDS, ...EMAIL_FOLLOWUP_FIELDS];
+  const allowed = ['Follow Up Status', 'Follow Up Completed Date', 'Assigned To', 'Notes', ...FOLLOWUP_REVIEW_FIELDS, 'Human Eligibility Decision', 'Decision Reason', 'Manual Contact Needed', 'Manual Contact Status'];
   allowed.forEach(field => {
     if (updates[field] === undefined) return;
     const col = headers.indexOf(field) + 1;
@@ -683,7 +640,7 @@ function ensureFollowupReviewColumns_(ss) {
   const sheet = ss.getSheetByName(SHEETS.FOLLOWUP);
   if (!sheet) return;
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
-  FOLLOWUP_REVIEW_FIELDS.concat(EMAIL_FOLLOWUP_FIELDS).forEach(field => {
+  FOLLOWUP_REVIEW_FIELDS.forEach(field => {
     if (headers.includes(field)) return;
     sheet.getRange(1, sheet.getLastColumn() + 1).setValue(field);
     headers.push(field);
@@ -696,19 +653,17 @@ function refreshDashboard() {
   const metrics = [
     ['Total Prescreening Submitted', countRows_(ss, SHEETS.PRESCREEN_CLEAN)],
     ['Total Consent Submitted', countRows_(ss, SHEETS.CONSENT_CLEAN)],
+    ['Screening Review Records', countRows_(ss, SHEETS.SCREENING_REVIEW)],
+    ['Approved Eligible', countRows_(ss, SHEETS.ELIGIBLE)],
+    ['Marked Ineligible', countRows_(ss, SHEETS.INELIGIBLE)],
     ['Total Master Enrollment Records', countRows_(ss, SHEETS.MASTER)],
-    ['Follow Up Needed', countWhere_(ss, SHEETS.MASTER, 'Follow Up Needed', 'Yes')],
-    ['Follow Up Sent', countWhere_(ss, SHEETS.FOLLOWUP, 'Follow Up Status', 'Email Sent')],
-    ['Follow Up Completed', countWhere_(ss, SHEETS.FOLLOWUP, 'Follow Up Status', 'Completed')],
+    ['Manual Contact Needed', countWhere_(ss, SHEETS.SCREENING_REVIEW, 'Manual Contact Needed', 'Yes')],
+    ['Manual Contact Completed', countWhere_(ss, SHEETS.SCREENING_REVIEW, 'Manual Contact Status', 'Completed')],
     ['Consent Completed', countWhere_(ss, SHEETS.MASTER, 'Consent Status', 'Completed')],
     ['Ready for DARTS', countWhere_(ss, SHEETS.MASTER, 'Ready for DARTS', 'Yes')],
     ['Unmatched Consent Records', countRows_(ss, UNMATCHED_CONSENT_SHEET)],
     ['Possible Duplicate Records', countWhere_(ss, MATCH_REVIEW_SHEET, 'Review Status', 'Needs Review')],
-    ['Needs Review', countWhere_(ss, SHEETS.MASTER, 'Ready for DARTS', 'Review')],
-    ['Emails Pending Approval', countWhere_(ss, EMAIL_OUTBOX_SHEET, 'Approval Status', 'Pending Approval')],
-    ['Emails Ready To Send', countWhere_(ss, EMAIL_OUTBOX_SHEET, 'Send Status', 'Ready To Send')],
-    ['Emails Sent', countWhere_(ss, EMAIL_OUTBOX_SHEET, 'Send Status', 'Sent')],
-    ['Replies Received', countRows_(ss, REPLY_LOG_SHEET)]
+    ['Needs Review', countWhere_(ss, SHEETS.SCREENING_REVIEW, 'Eligibility Review Status', 'Needs Review')]
   ];
   const headerRow = 2;
   const values = sh.getDataRange().getValues();
@@ -725,6 +680,7 @@ function refreshDashboard() {
     sh.getRange(row, valueCol).setValue(value);
   });
 }
+
 
 function normalizePrescreening_(raw, index, config) {
   const responseId = getFirst_(raw, ['Response ID', 'ResponseID']) || `P-MANUAL-${index}`;
@@ -805,17 +761,214 @@ function normalizeConsent_(raw, index, config) {
   };
 }
 
-function buildMasterEnrollment_(prescreens, consents, manualFollowup, config, manualMatchByEnrollment) {
+
+function ensureScreeningInfrastructure_(ss) {
+  ensureSheetWithHeaders_(ss, SHEETS.SCREENING_REVIEW, SCREENING_REVIEW_HEADERS);
+  ensureSheetWithHeaders_(ss, SHEETS.ELIGIBLE, ELIGIBLE_PARTICIPANTS_HEADERS);
+  ensureSheetWithHeaders_(ss, SHEETS.INELIGIBLE, INELIGIBLE_PARTICIPANTS_HEADERS);
+}
+
+function readManualScreeningState_(sheet) {
+  const state = new Map();
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return state;
+  readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW).forEach(row => {
+    const id = String(row['EnrollmentID'] || '').trim();
+    if (!id) return;
+    state.set(id, row);
+  });
+  return state;
+}
+
+function buildScreeningReview_(prescreens, manualByEnrollment, legacyByEnrollment) {
   return prescreens.map(p => {
     const enrollmentId = enrollmentIdFor_(p);
-    const manual = manualFollowup.get(enrollmentId) || {};
+    const manual = manualByEnrollment.get(enrollmentId) || {};
+    const legacy = legacyByEnrollment.get(enrollmentId) || {};
+    const suggestion = systemEligibilitySuggestion_(p);
+    const decision = manual['Human Eligibility Decision'] || legacyDecisionFromFollowup_(legacy) || 'Pending Review';
+    const reason = manual['Decision Reason'] || legacy['Follow-Up Outcome'] || '';
+    const manualContactNeeded = manual['Manual Contact Needed'] || contactNeededForDecision_(decision, p);
+    const reviewStatus = manual['Eligibility Review Status'] || screeningStatusForDecision_(decision, suggestion);
+    return {
+      'EnrollmentID': enrollmentId,
+      'PrescreeningID': p['PrescreeningID'] || '',
+      'ResponseID': p['ResponseID'] || '',
+      'Submitted At': p['Submitted At'] || '',
+      'Child Full Name': p['Child Full Name'] || '',
+      'Parent/Caretaker Name': p['Parent/Caretaker Name'] || '',
+      'Parent Email': p['Parent Email'] || '',
+      'Parent Phone': p['Parent Phone'] || '',
+      'Cohort ID': p['Cohort ID'] || '',
+      'Cohort Name': p['Cohort Name'] || '',
+      'Site': p['Site'] || '',
+      'Program Term': p['Program Term'] || '',
+      'Neurodivergent Response': p['Neurodivergent Response'] || '',
+      'Conditions/Diagnoses': p['Conditions/Diagnoses'] || '',
+      'Diagnostic/Support Details': p['Diagnostic/Support Details'] || '',
+      'Physical Disability Supports': p['Physical Disability Supports'] || '',
+      'System Eligibility Suggestion': suggestion,
+      'System Eligibility Reason': systemEligibilityReason_(p, suggestion),
+      'Human Eligibility Decision': decision,
+      'Decision Reason': reason,
+      'Manual Contact Needed': manualContactNeeded,
+      'Manual Contact Status': manual['Manual Contact Status'] || legacy['Follow Up Status'] || (manualContactNeeded === 'Yes' ? 'Not Started' : 'Not Needed'),
+      'Assigned To': manual['Assigned To'] || legacy['Assigned To'] || '',
+      'Updated Support Details': manual['Updated Support Details'] || legacy['Updated Support Details'] || '',
+      'Parent Response Summary': manual['Parent Response Summary'] || legacy['Parent Response Summary'] || legacy['Follow-Up Outcome'] || '',
+      'Eligibility Review Status': reviewStatus,
+      'Reviewed By': manual['Reviewed By'] || legacy['Reviewed By'] || '',
+      'Review Date': manual['Review Date'] || legacy['Review Date'] || '',
+      'PI Notes': manual['PI Notes'] || legacy['PI Notes'] || '',
+      'Notes': manual['Notes'] || legacy['Notes'] || '',
+      'Last Updated': new Date()
+    };
+  });
+}
+
+function systemEligibilitySuggestion_(p) {
+  const neuro = String(p['Neurodivergent Response'] || '').trim();
+  if (neuro === 'Yes') return 'Likely Eligible';
+  if (neuro === 'No') return hasSupportContext_(p) ? 'Needs Human Review' : 'Likely Not Eligible';
+  return 'Needs Human Review';
+}
+
+function systemEligibilityReason_(p, suggestion) {
+  if (suggestion === 'Likely Eligible') return 'Parent selected Yes for neurodivergent/disability/developmental condition/learning difference.';
+  if (suggestion === 'Likely Not Eligible') return 'Parent selected No and no additional diagnostic/support details were detected.';
+  if (String(p['Neurodivergent Response'] || '') === 'No') return 'Parent selected No, but support details or conditions were detected; staff should review.';
+  return 'Neurodivergent/support-needs answer is missing or ambiguous; staff should review.';
+}
+
+function hasSupportContext_(p) {
+  return Boolean(String(p['Conditions/Diagnoses'] || p['Diagnostic/Support Details'] || p['Physical Disability Supports'] || '').trim());
+}
+
+function legacyDecisionFromFollowup_(legacy) {
+  const status = String(legacy['Eligibility Review Status'] || '').trim();
+  if (/not eligible/i.test(status)) return 'Not Eligible';
+  if (/ready|likely eligible/i.test(status)) return 'Approved Eligible';
+  return '';
+}
+
+function contactNeededForDecision_(decision, p) {
+  if (decision === 'Needs More Information') return 'Yes';
+  if (String(p['Neurodivergent Response'] || '') === 'No' && hasSupportContext_(p)) return 'Yes';
+  return 'No';
+}
+
+function screeningStatusForDecision_(decision, suggestion) {
+  if (decision === 'Approved Eligible') return 'Eligible';
+  if (decision === 'Not Eligible') return 'Ineligible';
+  if (decision === 'Needs More Information') return 'Needs More Information';
+  return suggestion === 'Needs Human Review' ? 'Needs Review' : 'Pending Review';
+}
+
+function buildEligibleParticipants_(screeningRows) {
+  return screeningRows.filter(row => row['Human Eligibility Decision'] === 'Approved Eligible').map(row => Object.assign({}, row, {
+    'Eligibility Approved At': row['Review Date'] || row['Last Updated'] || new Date()
+  }));
+}
+
+function buildIneligibleParticipants_(screeningRows) {
+  return screeningRows.filter(row => row['Human Eligibility Decision'] === 'Not Eligible').map(row => Object.assign({}, row, {
+    'Eligibility Closed At': row['Review Date'] || row['Last Updated'] || new Date()
+  }));
+}
+
+function buildManualContactQueue_(screeningRows) {
+  return screeningRows.filter(row => row['Manual Contact Needed'] === 'Yes' || row['Human Eligibility Decision'] === 'Needs More Information').map(row => ({
+    'EnrollmentID': row['EnrollmentID'],
+    'Child Full Name': row['Child Full Name'],
+    'Parent/Caretaker Name': row['Parent/Caretaker Name'],
+    'Parent Email': row['Parent Email'],
+    'Parent Phone': row['Parent Phone'],
+    'Cohort ID': row['Cohort ID'],
+    'Cohort Name': row['Cohort Name'],
+    'Site': row['Site'],
+    'Program Term': row['Program Term'],
+    'Neurodivergent Response': row['Neurodivergent Response'],
+    'Conditions/Diagnoses': row['Conditions/Diagnoses'],
+    'Support Details': row['Updated Support Details'] || row['Diagnostic/Support Details'],
+    'Physical Disability Supports': row['Physical Disability Supports'],
+    'Follow Up Reason': row['System Eligibility Reason'],
+    'Follow Up Status': row['Manual Contact Status'] || 'Not Started',
+    'Assigned To': row['Assigned To'],
+    'Notes': row['Notes'],
+    'Updated Support Details': row['Updated Support Details'],
+    'Parent Response Summary': row['Parent Response Summary'],
+    'Eligibility Review Status': row['Eligibility Review Status'],
+    'Human Eligibility Decision': row['Human Eligibility Decision'],
+    'Decision Reason': row['Decision Reason'],
+    'Reviewed By': row['Reviewed By'],
+    'Review Date': row['Review Date'],
+    'PI Notes': row['PI Notes']
+  }));
+}
+
+function updateScreeningReview(updates) {
+  updates = updates || {};
+  if (!updates.enrollmentId) throw new Error('Missing enrollmentId.');
+  const ss = getSpreadsheet_();
+  ensureScreeningInfrastructure_(ss);
+  const sheet = ss.getSheetByName(SHEETS.SCREENING_REVIEW);
+  const rows = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW);
+  const rowIndex = rows.findIndex(row => String(row['EnrollmentID']) === String(updates.enrollmentId));
+  if (rowIndex < 0) throw new Error(`EnrollmentID not found in Screening_Review: ${updates.enrollmentId}`);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const targetRow = rowIndex + DATA_START_ROW;
+  SCREENING_MANUAL_FIELDS.forEach(field => {
+    if (updates[field] === undefined) return;
+    const col = headers.indexOf(field) + 1;
+    if (col > 0) sheet.getRange(targetRow, col).setValue(updates[field]);
+  });
+  if (updates['Human Eligibility Decision'] && !updates['Review Date']) {
+    const col = headers.indexOf('Review Date') + 1;
+    if (col > 0) sheet.getRange(targetRow, col).setValue(new Date());
+  }
+  refreshEnrollmentTracker();
+  return buildAppDashboardData_(false);
+}
+
+function batchUpdateScreeningReview(request) {
+  request = request || {};
+  const ids = Array.isArray(request.enrollmentIds) ? request.enrollmentIds : [];
+  if (!ids.length) throw new Error('Select at least one participant.');
+  const decision = request.decision || 'Approved Eligible';
+  const ss = getSpreadsheet_();
+  ensureScreeningInfrastructure_(ss);
+  const sheet = ss.getSheetByName(SHEETS.SCREENING_REVIEW);
+  const rows = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const idSet = new Set(ids.map(String));
+  rows.forEach((row, i) => {
+    if (!idSet.has(String(row['EnrollmentID']))) return;
+    const targetRow = i + DATA_START_ROW;
+    const updates = {
+      'Human Eligibility Decision': decision,
+      'Decision Reason': request.reason || '',
+      'Eligibility Review Status': screeningStatusForDecision_(decision, { 'Approved Eligible':'Likely Eligible' }[decision] || ''),
+      'Reviewed By': request.reviewedBy || '',
+      'Review Date': new Date(),
+      'Notes': request.notes || row['Notes'] || ''
+    };
+    Object.entries(updates).forEach(([field, value]) => {
+      const col = headers.indexOf(field) + 1;
+      if (col > 0) sheet.getRange(targetRow, col).setValue(value);
+    });
+  });
+  refreshEnrollmentTracker();
+  return buildAppDashboardData_(false);
+}
+
+function buildMasterEnrollment_(eligibleRows, consents, config, manualMatchByEnrollment) {
+  return eligibleRows.map(p => {
+    const enrollmentId = p['EnrollmentID'] || enrollmentIdFor_(p);
     const manualMatch = manualMatchByEnrollment.get(enrollmentId) || {};
     const match = selectConsentMatch_(p, consents, manualMatch);
     const consent = match.accepted ? match.consent : null;
-    const followStatus = p['Follow Up Needed'] === 'Yes' ? (manual['Follow Up Status'] || p['Follow Up Status'] || config.defaultFollowUpStatus) : 'Not Needed';
     const consentStatus = consent ? consent['Consent Status'] : (match.needsReview ? 'Review' : config.defaultConsentStatus);
-    const ready = isReadyWithMatch_(p['Follow Up Needed'], followStatus, consentStatus, match);
-    const enrollmentStatus = ready === 'Yes' ? 'Ready for DARTS' : (match.needsReview ? 'Ready for Review' : config.defaultEnrollmentStatus);
+    const ready = isReadyWithEligibility_(p['Human Eligibility Decision'], consentStatus, match);
+    const enrollmentStatus = ready === 'Yes' ? 'Ready for DARTS' : (match.needsReview ? 'Ready for Review' : 'Eligible - Awaiting Consent');
     return {
       'EnrollmentID': enrollmentId,
       'Child Full Name': p['Child Full Name'],
@@ -826,11 +979,14 @@ function buildMasterEnrollment_(prescreens, consents, manualFollowup, config, ma
       'Cohort Name': p['Cohort Name'] || (consent && consent['Cohort Name']) || '',
       'Site': p['Site'] || (consent && consent['Site']) || '',
       'Program Term': p['Program Term'] || (consent && consent['Program Term']) || '',
-      'Prescreening Status': p['Response Status'] || 'Completed',
+      'Human Eligibility Decision': p['Human Eligibility Decision'],
+      'Eligibility Review Status': p['Eligibility Review Status'] || 'Eligible',
+      'Decision Reason': p['Decision Reason'] || '',
+      'Prescreening Status': 'Completed',
       'Consent Status': consentStatus,
       'Neurodivergent Response': p['Neurodivergent Response'],
-      'Follow Up Needed': p['Follow Up Needed'],
-      'Follow Up Status': followStatus,
+      'Follow Up Needed': p['Manual Contact Needed'] || 'No',
+      'Follow Up Status': p['Manual Contact Status'] || 'Not Needed',
       'Enrollment Status': enrollmentStatus,
       'Ready for DARTS': ready,
       'Prescreening ResponseID': p['ResponseID'],
@@ -843,7 +999,7 @@ function buildMasterEnrollment_(prescreens, consents, manualFollowup, config, ma
       'Manual Consent ResponseID': manualMatch['Manual Consent ResponseID'] || '',
       'Manual Match Notes': manualMatch['Manual Match Notes'] || '',
       'Last Updated': new Date(),
-      'Notes': manual['Notes'] || ''
+      'Notes': p['Notes'] || ''
     };
   });
 }
@@ -901,7 +1057,7 @@ function buildUnmatchedConsent_(prescreens, consents, master) {
 }
 
 function buildFollowupQueue_(master, prescreens, manualFollowup, config) {
-  const prescreenById = new Map(prescreens.map(p => [enrollmentIdFor_(p), p]));
+  const prescreenById = new Map(prescreens.map(p => [p['EnrollmentID'] || enrollmentIdFor_(p), p]));
   return master.filter(m => m['Follow Up Needed'] === 'Yes').map(m => {
     const p = prescreenById.get(m['EnrollmentID']) || {};
     const manual = manualFollowup.get(m['EnrollmentID']) || {};
@@ -921,36 +1077,24 @@ function buildFollowupQueue_(master, prescreens, manualFollowup, config) {
       'Physical Disability Supports': p['Physical Disability Supports'],
       'Follow Up Reason': followupReason_(p),
       'Follow Up Status': manual['Follow Up Status'] || config.defaultFollowUpStatus,
-      'Email Drafted': manual['Email Drafted'] || 'No',
-      'Email Sent Date': manual['Email Sent Date'] || '',
       'Follow Up Completed Date': manual['Follow Up Completed Date'] || '',
       'Assigned To': manual['Assigned To'] || '',
       'Notes': manual['Notes'] || '',
       'Updated Support Details': manual['Updated Support Details'] || '',
-      'Follow-Up Outcome': manual['Follow-Up Outcome'] || '',
+      'Parent Response Summary': manual['Parent Response Summary'] || '',
       'Eligibility Review Status': manual['Eligibility Review Status'] || '',
+      'Human Eligibility Decision': manual['Human Eligibility Decision'] || '',
+      'Decision Reason': manual['Decision Reason'] || '',
       'Reviewed By': manual['Reviewed By'] || '',
       'Review Date': manual['Review Date'] || '',
-      'PI Notes': manual['PI Notes'] || '',
-      'Email Workflow Status': manual['Email Workflow Status'] || '',
-      'Latest EmailJobID': manual['Latest EmailJobID'] || '',
-      'Latest Email Type': manual['Latest Email Type'] || '',
-      'Latest Email Subject': manual['Latest Email Subject'] || '',
-      'Latest Email Approved At': manual['Latest Email Approved At'] || '',
-      'Latest Email Sent At': manual['Latest Email Sent At'] || '',
-      'Latest Reply Received At': manual['Latest Reply Received At'] || '',
-      'Reply Status': manual['Reply Status'] || 'No Reply',
-      'Reminder Status': manual['Reminder Status'] || '',
-      'Reminder Count': manual['Reminder Count'] || 0,
-      'Next Reminder Date': manual['Next Reminder Date'] || '',
-      'Do Not Contact': manual['Do Not Contact'] || 'No',
-      'Do Not Contact Reason': manual['Do Not Contact Reason'] || ''
+      'PI Notes': manual['PI Notes'] || ''
     };
   });
 }
 
+
 function buildReadyForDarts_(master, prescreens, consents) {
-  const prescreenById = new Map(prescreens.map(p => [enrollmentIdFor_(p), p]));
+  const prescreenById = new Map(prescreens.map(p => [p['EnrollmentID'] || enrollmentIdFor_(p), p]));
   const consentByResp = new Map(consents.map(c => [c['ResponseID'], c]));
   return master.filter(m => m['Ready for DARTS'] === 'Yes').map(m => {
     const p = prescreenById.get(m['EnrollmentID']) || {};
@@ -994,618 +1138,6 @@ function runPhaseOneSelfTest() {
   refreshEnrollmentTracker();
 }
 
-
-// ---------- Email workflow / no-premium Outlook bridge ----------
-
-function initializeEmailWorkflow() {
-  const ss = getSpreadsheet_();
-  ensureEmailWorkflowInfrastructure_(ss);
-  return buildAppDashboardData_(false);
-}
-
-function ensureEmailWorkflowInfrastructure_(ss) {
-  const templates = ensureSheetWithHeaders_(ss, EMAIL_TEMPLATES_SHEET, EMAIL_TEMPLATE_HEADERS);
-  ensureSheetWithHeaders_(ss, EMAIL_OUTBOX_SHEET, EMAIL_OUTBOX_HEADERS);
-  ensureSheetWithHeaders_(ss, EMAIL_LOG_SHEET, EMAIL_LOG_HEADERS);
-  ensureSheetWithHeaders_(ss, REPLY_LOG_SHEET, REPLY_LOG_HEADERS);
-  ensureSheetWithHeaders_(ss, REMINDER_QUEUE_SHEET, REMINDER_QUEUE_HEADERS);
-  ensureSheetWithHeaders_(ss, POWER_AUTOMATE_CONFIG_SHEET, POWER_AUTOMATE_CONFIG_HEADERS);
-  ensureSheetWithHeaders_(ss, PA_EMAIL_OUTBOX_SHEET, PA_EMAIL_OUTBOX_HEADERS);
-  ensureSheetWithHeaders_(ss, PA_EMAIL_STATUS_SHEET, PA_EMAIL_STATUS_HEADERS);
-  ensureSheetWithHeaders_(ss, PA_REPLY_INBOX_SHEET, PA_REPLY_INBOX_HEADERS);
-  appendMissingHeaders_(ss.getSheetByName(SHEETS.FOLLOWUP), EMAIL_FOLLOWUP_FIELDS);
-  seedDefaultEmailTemplates_(templates);
-}
-
-function seedDefaultEmailTemplates_(sheet) {
-  const rows = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW);
-  if (rows.some(row => row['TemplateID'] === 'TPL-FOLLOWUP-INITIAL')) return;
-  sheet.appendRow([
-    'TPL-FOLLOWUP-INITIAL',
-    'Initial no-response clarification follow-up',
-    'Initial Follow-Up',
-    'Gaming4Good follow-up for {{child_first_name}}',
-    [
-      'Dear {{parent_first_name}},',
-      '',
-      'Thank you for completing the Gaming4Good prescreening form for {{child_first_name}}.',
-      '',
-      'We are following up because the prescreening response indicated that {{child_first_name}} may not currently identify as neurodivergent or have a formal disability/developmental condition/learning difference diagnosis. We would like to better understand whether there are any support needs, learning differences, school accommodations, services, or other information that may help the research team determine eligibility.',
-      '',
-      'If you are comfortable sharing, please reply with any additional details about current supports, diagnoses, accommodations, or learning needs that may not have been fully captured in the form.',
-      '',
-      'Thank you,',
-      'The Gaming4Good Research Team',
-      '',
-      'Reference: {{email_job_id}}'
-    ].join('\n'),
-    'Yes', 'Yes', '', '', new Date(), 'Default template created by Apps Script. Review and approve before production use.'
-  ]);
-}
-
-function getEmailTemplates_(ss) {
-  ensureEmailWorkflowInfrastructure_(ss);
-  return readObjects_(ss.getSheetByName(EMAIL_TEMPLATES_SHEET), CLEAN_HEADER_ROW, DATA_START_ROW)
-    .filter(row => String(row['Active'] || '').toLowerCase() !== 'no');
-}
-
-function previewFollowupEmail(request) {
-  const ss = getSpreadsheet_();
-  ensureEmailWorkflowInfrastructure_(ss);
-  const template = findEmailTemplate_(ss, request && request.templateId);
-  const context = buildEmailMergeContext_(ss, request && request.enrollmentId, request && request.emailJobId);
-  return buildEmailDraftPayload_(template, context);
-}
-
-function saveEmailDraft(request) {
-  const ss = getSpreadsheet_();
-  ensureEmailWorkflowInfrastructure_(ss);
-  const enrollmentId = String(request && request.enrollmentId || '').trim();
-  if (!enrollmentId) throw new Error('EnrollmentID is required to create an email draft.');
-  const template = findEmailTemplate_(ss, request && request.templateId);
-  const existingJobId = String(request && request.emailJobId || '').trim();
-  const emailJobId = existingJobId || nextId_('EMAIL');
-  const context = buildEmailMergeContext_(ss, enrollmentId, emailJobId);
-  const draft = buildEmailDraftPayload_(template, context);
-  const now = new Date();
-  const record = {
-    'EmailJobID': emailJobId,
-    'EnrollmentID': enrollmentId,
-    'PrescreeningID': context.prescreeningId,
-    'ConsentID': context.consentId,
-    'Child Full Name': context.childFullName,
-    'Parent/Caretaker Name': context.parentFullName,
-    'Parent Email': context.parentEmail,
-    'Parent Phone': context.parentPhone,
-    'Cohort ID': context.cohortId,
-    'Cohort Name': context.cohortName,
-    'Site': context.site,
-    'Program Term': context.programTerm,
-    'Email Type': request && request.emailType || template['Email Type'] || 'Initial Follow-Up',
-    'TemplateID': template['TemplateID'],
-    'Email Subject': request && request.subject || draft.subject,
-    'Email Body': request && request.body || draft.body,
-    'Email Body HTML': request && request.bodyHtml || draft.bodyHtml,
-    'Approval Status': 'Pending Approval',
-    'Approved By': '',
-    'Approved At': '',
-    'Send Status': 'Draft',
-    'Scheduled Send At': request && request.scheduledSendAt || '',
-    'Sent At': '',
-    'Power Automate Run ID': '',
-    'Power Automate Status': '',
-    'Retry Count': 0,
-    'Last Attempt At': '',
-    'Error Message': '',
-    'Created At': existingJobId ? '' : now,
-    'Updated At': now,
-    'Do Not Send': 'No',
-    'Notes': request && request.notes || ''
-  };
-  upsertByKey_(ss.getSheetByName(EMAIL_OUTBOX_SHEET), EMAIL_OUTBOX_HEADERS, 'EmailJobID', emailJobId, record);
-  appendEmailLog_(ss, record, 'Draft Created', 'Draft', '', '');
-  updateFollowupEmailFields_(ss, enrollmentId, {
-    'Email Workflow Status': 'Draft Created',
-    'Email Drafted': 'Yes',
-    'Latest EmailJobID': emailJobId,
-    'Latest Email Type': record['Email Type'],
-    'Latest Email Subject': record['Email Subject']
-  });
-  return buildAppDashboardData_(false);
-}
-
-function approveEmailForSending(request) {
-  const ss = getSpreadsheet_();
-  ensureEmailWorkflowInfrastructure_(ss);
-  const emailJobId = String(request && request.emailJobId || '').trim();
-  if (!emailJobId) throw new Error('EmailJobID is required for approval.');
-  const sheet = ss.getSheetByName(EMAIL_OUTBOX_SHEET);
-  const rowInfo = findRowByKey_(sheet, 'EmailJobID', emailJobId);
-  if (!rowInfo.rowNumber) throw new Error(`Email job not found: ${emailJobId}`);
-  const record = rowInfo.object;
-  if (record['Do Not Send'] === 'Yes') throw new Error('This email job is marked Do Not Send.');
-  if (!record['Parent Email']) throw new Error('Parent Email is required before approval.');
-  const scheduled = String(request && request.scheduledSendAt || record['Scheduled Send At'] || '').trim();
-  const now = new Date();
-  const updates = {
-    'Approval Status': 'Approved',
-    'Approved By': request && request.approvedBy || Session.getActiveUser().getEmail() || 'Dashboard Admin',
-    'Approved At': now,
-    'Send Status': scheduled ? 'Scheduled' : 'Ready To Send',
-    'Scheduled Send At': scheduled,
-    'Updated At': now,
-    'Notes': request && request.notes !== undefined ? request.notes : record['Notes']
-  };
-  updateRowByHeader_(sheet, rowInfo.rowNumber, updates);
-  appendEmailLog_(ss, Object.assign({}, record, updates), 'Approved', updates['Send Status'], '', '');
-  updateFollowupEmailFields_(ss, record['EnrollmentID'], {
-    'Email Workflow Status': updates['Send Status'],
-    'Latest Email Approved At': now,
-    'Latest EmailJobID': emailJobId,
-    'Latest Email Type': record['Email Type'],
-    'Latest Email Subject': record['Email Subject']
-  });
-  syncApprovedEmailsToPaOutbox_(ss);
-  return buildAppDashboardData_(false);
-}
-
-function cancelEmailJob(request) {
-  const ss = getSpreadsheet_();
-  ensureEmailWorkflowInfrastructure_(ss);
-  const emailJobId = String(request && request.emailJobId || '').trim();
-  const sheet = ss.getSheetByName(EMAIL_OUTBOX_SHEET);
-  const rowInfo = findRowByKey_(sheet, 'EmailJobID', emailJobId);
-  if (!rowInfo.rowNumber) throw new Error(`Email job not found: ${emailJobId}`);
-  const updates = {'Send Status': 'Cancelled', 'Do Not Send': 'Yes', 'Updated At': new Date(), 'Notes': request && request.reason || rowInfo.object['Notes'] || ''};
-  updateRowByHeader_(sheet, rowInfo.rowNumber, updates);
-  appendEmailLog_(ss, Object.assign({}, rowInfo.object, updates), 'Cancelled', 'Cancelled', '', '');
-  updateFollowupEmailFields_(ss, rowInfo.object['EnrollmentID'], {'Email Workflow Status': 'Cancelled'});
-  return buildAppDashboardData_(false);
-}
-
-/**
- * No-premium Outlook bridge for Power Automate.
- *
- * This keeps Outlook sending possible without the Premium HTTP connector:
- * - Apps Script/dashboard remains the source of truth for drafts and approvals.
- * - Power Automate Standard Google Sheets connector reads PA_Email_Outbox.
- * - Power Automate writes send results to PA_Email_Status and replies to PA_Reply_Inbox.
- * - This sync imports those rows back into Email_Outbox, Email_Log, Reply_Log, and Followup_Queue.
- */
-function syncNoPremiumOutlookBridge() {
-  const ss = getSpreadsheet_();
-  ensureEmailWorkflowInfrastructure_(ss);
-  const exported = syncApprovedEmailsToPaOutbox_(ss);
-  const statuses = syncPaEmailStatuses_(ss);
-  const replies = syncPaReplyInbox_(ss);
-  return Object.assign({ok: true}, exported, statuses, replies, {dashboard: buildAppDashboardData_(false)});
-}
-
-function syncApprovedEmailsToPaOutbox_(ss) {
-  const outbox = ss.getSheetByName(EMAIL_OUTBOX_SHEET);
-  const bridge = ss.getSheetByName(PA_EMAIL_OUTBOX_SHEET);
-  const now = new Date();
-  let exported = 0;
-  readObjects_(outbox, CLEAN_HEADER_ROW, DATA_START_ROW)
-    .filter(isEmailJobEligibleForOutlookBridge_)
-    .forEach(row => {
-      upsertByKey_(bridge, PA_EMAIL_OUTBOX_HEADERS, 'email_job_id', row['EmailJobID'], paOutboxRecordFor_(row, now));
-      exported += 1;
-    });
-  return {paOutboxExported: exported};
-}
-
-function isEmailJobEligibleForOutlookBridge_(row) {
-  if (row['Approval Status'] !== 'Approved') return false;
-  if (!['Ready To Send', 'Scheduled', 'Failed'].includes(String(row['Send Status'] || ''))) return false;
-  if (row['Do Not Send'] === 'Yes' || row['Sent At']) return false;
-  if (row['Scheduled Send At'] && new Date(row['Scheduled Send At']) > new Date()) return false;
-  return Boolean(row['EmailJobID'] && row['Parent Email']);
-}
-
-function paOutboxRecordFor_(row, now) {
-  return {
-    'email_job_id': row['EmailJobID'] || '',
-    'enrollment_id': row['EnrollmentID'] || '',
-    'parent_email': row['Parent Email'] || '',
-    'parent_name': row['Parent/Caretaker Name'] || '',
-    'parent_phone': row['Parent Phone'] || '',
-    'child_name': row['Child Full Name'] || '',
-    'cohort_id': row['Cohort ID'] || '',
-    'cohort_name': row['Cohort Name'] || '',
-    'site': row['Site'] || '',
-    'program_term': row['Program Term'] || '',
-    'email_type': row['Email Type'] || '',
-    'template_id': row['TemplateID'] || '',
-    'subject': row['Email Subject'] || '',
-    'body_text': row['Email Body'] || '',
-    'body_html': row['Email Body HTML'] || '',
-    'approval_status': row['Approval Status'] || '',
-    'send_status': row['Send Status'] || '',
-    'scheduled_send_at': row['Scheduled Send At'] || '',
-    'sent_at': row['Sent At'] || '',
-    'do_not_send': row['Do Not Send'] || 'No',
-    'retry_count': row['Retry Count'] || 0,
-    'last_attempt_at': row['Last Attempt At'] || '',
-    'error_message': row['Error Message'] || '',
-    'power_automate_run_id': row['Power Automate Run ID'] || '',
-    'reply_status': row['Reply Status'] || '',
-    'created_at': row['Created At'] || now,
-    'updated_at': now,
-    'notes': row['Notes'] || ''
-  };
-}
-
-function syncPaEmailStatuses_(ss) {
-  const statusSheet = ss.getSheetByName(PA_EMAIL_STATUS_SHEET);
-  let imported = 0;
-  readObjects_(statusSheet, CLEAN_HEADER_ROW, DATA_START_ROW).forEach(statusRow => {
-    if (statusRow['processed_at'] || !statusRow['email_job_id']) return;
-    const result = receivePowerAutomateSendUpdate_({
-      secret: getPowerAutomateConfigValue_('PowerAutomateCallbackSecret'),
-      emailJobId: statusRow['email_job_id'],
-      status: statusRow['status'] || 'Sent',
-      sentAt: statusRow['sent_at'],
-      attemptedAt: statusRow['attempted_at'],
-      runId: statusRow['run_id'],
-      errorMessage: statusRow['error_message'],
-      rawResponse: statusRow['raw_response']
-    });
-    updatePaOutboxFromStatus_(ss, statusRow);
-    const rowInfo = statusRow['status_id']
-      ? findRowByKey_(statusSheet, 'status_id', statusRow['status_id'])
-      : findRowByKey_(statusSheet, 'email_job_id', statusRow['email_job_id']);
-    if (rowInfo.rowNumber) updateRowByHeader_(statusSheet, rowInfo.rowNumber, {'processed_at': new Date()});
-    imported += result && result.ok ? 1 : 0;
-  });
-  return {paStatusesImported: imported};
-}
-
-function updatePaOutboxFromStatus_(ss, statusRow) {
-  const bridge = ss.getSheetByName(PA_EMAIL_OUTBOX_SHEET);
-  const rowInfo = findRowByKey_(bridge, 'email_job_id', statusRow['email_job_id']);
-  if (!rowInfo.rowNumber) return;
-  const sent = /sent|success/i.test(String(statusRow['status'] || 'Sent'));
-  updateRowByHeader_(bridge, rowInfo.rowNumber, {
-    'send_status': sent ? 'Sent' : 'Failed',
-    'sent_at': sent ? (statusRow['sent_at'] || new Date()) : rowInfo.object['sent_at'],
-    'last_attempt_at': statusRow['attempted_at'] || new Date(),
-    'power_automate_run_id': statusRow['run_id'] || rowInfo.object['power_automate_run_id'] || '',
-    'error_message': statusRow['error_message'] || '',
-    'updated_at': new Date()
-  });
-}
-
-function syncPaReplyInbox_(ss) {
-  const replySheet = ss.getSheetByName(PA_REPLY_INBOX_SHEET);
-  let imported = 0;
-  readObjects_(replySheet, CLEAN_HEADER_ROW, DATA_START_ROW).forEach(replyRow => {
-    if (replyRow['processed_at'] || !replyRow['email_job_id']) return;
-    const result = receivePowerAutomateReply_({
-      secret: getPowerAutomateConfigValue_('PowerAutomateCallbackSecret'),
-      replyId: replyRow['reply_id'],
-      emailJobId: replyRow['email_job_id'],
-      enrollmentId: replyRow['enrollment_id'],
-      parentEmail: replyRow['parent_email'],
-      fromName: replyRow['from_name'],
-      fromAddress: replyRow['from_address'],
-      subject: replyRow['subject'],
-      receivedAt: replyRow['received_at'],
-      bodyPreview: replyRow['body_preview'],
-      bodyText: replyRow['body_text'],
-      messageId: replyRow['message_id'],
-      hasAttachments: replyRow['has_attachments'],
-      notes: replyRow['notes'],
-      rawResponse: replyRow['raw_response']
-    });
-    updatePaOutboxReplyStatus_(ss, replyRow);
-    const rowInfo = replyRow['reply_id']
-      ? findRowByKey_(replySheet, 'reply_id', replyRow['reply_id'])
-      : findRowByKey_(replySheet, 'email_job_id', replyRow['email_job_id']);
-    if (rowInfo.rowNumber) updateRowByHeader_(replySheet, rowInfo.rowNumber, {'processed_at': new Date()});
-    imported += result && result.ok ? 1 : 0;
-  });
-  return {paRepliesImported: imported};
-}
-
-function updatePaOutboxReplyStatus_(ss, replyRow) {
-  const bridge = ss.getSheetByName(PA_EMAIL_OUTBOX_SHEET);
-  const rowInfo = findRowByKey_(bridge, 'email_job_id', replyRow['email_job_id']);
-  if (!rowInfo.rowNumber) return;
-  updateRowByHeader_(bridge, rowInfo.rowNumber, {
-    'reply_status': 'Reply Received',
-    'updated_at': new Date()
-  });
-}
-
-function markDoNotContact(request) {
-  const ss = getSpreadsheet_();
-  ensureEmailWorkflowInfrastructure_(ss);
-  const enrollmentId = String(request && request.enrollmentId || '').trim();
-  if (!enrollmentId) throw new Error('EnrollmentID is required.');
-  updateFollowupEmailFields_(ss, enrollmentId, {'Do Not Contact': 'Yes', 'Do Not Contact Reason': request && request.reason || '', 'Email Workflow Status': 'Do Not Contact'});
-  return buildAppDashboardData_(false);
-}
-
-function getApprovedEmailJobsForPowerAutomate(secret) {
-  const ss = getSpreadsheet_();
-  validatePowerAutomateSecret_(secret);
-  ensureEmailWorkflowInfrastructure_(ss);
-  const now = new Date();
-  return readObjects_(ss.getSheetByName(EMAIL_OUTBOX_SHEET), CLEAN_HEADER_ROW, DATA_START_ROW)
-    .filter(row => row['Approval Status'] === 'Approved')
-    .filter(row => ['Ready To Send', 'Scheduled', 'Failed'].includes(String(row['Send Status'] || '')))
-    .filter(row => row['Do Not Send'] !== 'Yes' && row['Sent At'] === '')
-    .filter(row => !row['Scheduled Send At'] || new Date(row['Scheduled Send At']) <= now);
-}
-
-function receivePowerAutomateSendUpdate_(payload) {
-  const ss = getSpreadsheet_();
-  validatePowerAutomateSecret_(payload && (payload.secret || payload.callbackSecret));
-  ensureEmailWorkflowInfrastructure_(ss);
-  const emailJobId = String(payload.emailJobId || payload.EmailJobID || '').trim();
-  if (!emailJobId) throw new Error('Power Automate callback missing emailJobId.');
-  const sheet = ss.getSheetByName(EMAIL_OUTBOX_SHEET);
-  const rowInfo = findRowByKey_(sheet, 'EmailJobID', emailJobId);
-  if (!rowInfo.rowNumber) throw new Error(`Email job not found: ${emailJobId}`);
-  const status = String(payload.status || payload.sendStatus || 'Sent');
-  const sent = /sent|success/i.test(status);
-  const updates = {
-    'Send Status': sent ? 'Sent' : 'Failed',
-    'Sent At': sent ? (payload.sentAt || new Date()) : rowInfo.object['Sent At'],
-    'Power Automate Run ID': payload.runId || payload.powerAutomateRunId || rowInfo.object['Power Automate Run ID'] || '',
-    'Power Automate Status': status,
-    'Retry Count': Number(rowInfo.object['Retry Count'] || 0) + (sent ? 0 : 1),
-    'Last Attempt At': payload.attemptedAt || new Date(),
-    'Error Message': payload.error || payload.errorMessage || '',
-    'Updated At': new Date()
-  };
-  updateRowByHeader_(sheet, rowInfo.rowNumber, updates);
-  appendEmailLog_(ss, Object.assign({}, rowInfo.object, updates), sent ? 'Sent' : 'Failed', updates['Send Status'], updates['Power Automate Run ID'], JSON.stringify(payload));
-  updateFollowupEmailFields_(ss, rowInfo.object['EnrollmentID'], {
-    'Email Workflow Status': sent ? 'Awaiting Response' : 'Send Failed',
-    'Follow Up Status': sent ? 'Awaiting Response' : rowInfo.object['Follow Up Status'],
-    'Email Sent Date': sent ? updates['Sent At'] : '',
-    'Latest Email Sent At': sent ? updates['Sent At'] : '',
-    'Latest EmailJobID': emailJobId
-  });
-  return {ok: true, emailJobId, status: updates['Send Status']};
-}
-
-function receivePowerAutomateReply_(payload) {
-  const ss = getSpreadsheet_();
-  validatePowerAutomateSecret_(payload && (payload.secret || payload.callbackSecret));
-  ensureEmailWorkflowInfrastructure_(ss);
-  const emailJobId = String(payload.emailJobId || payload.EmailJobID || '').trim();
-  const enrollmentId = String(payload.enrollmentId || payload.EnrollmentID || '').trim() || enrollmentIdForEmailJob_(ss, emailJobId);
-  const followupBefore = getFollowupStatus_(ss, enrollmentId);
-  const reply = {
-    'ReplyID': payload.replyId || nextId_('REPLY'),
-    'EmailJobID': emailJobId,
-    'EnrollmentID': enrollmentId,
-    'Parent Email': payload.parentEmail || payload.fromAddress || payload.from || '',
-    'From Name': payload.fromName || '',
-    'From Address': payload.fromAddress || payload.from || '',
-    'Subject': payload.subject || '',
-    'Received At': payload.receivedAt || new Date(),
-    'Reply Preview': payload.bodyPreview || String(payload.bodyText || payload.body || '').slice(0, 300),
-    'Reply Body': payload.bodyText || payload.body || '',
-    'Has Attachments': payload.hasAttachments || '',
-    'Power Automate Message ID': payload.messageId || '',
-    'Follow Up Status Before Reply': followupBefore,
-    'Follow Up Status After Reply': 'Parent Replied',
-    'Reviewed By': '',
-    'Reviewed At': '',
-    'Notes': payload.notes || ''
-  };
-  appendObjectByHeaders_(ss.getSheetByName(REPLY_LOG_SHEET), REPLY_LOG_HEADERS, reply);
-  appendEmailLog_(ss, {'EmailJobID': emailJobId, 'EnrollmentID': enrollmentId, 'Parent Email': reply['Parent Email'], 'Child Full Name': '', 'Email Type': 'Reply', 'Email Subject': reply['Subject']}, 'Reply Received', 'Parent Replied', payload.runId || '', JSON.stringify(payload));
-  updateFollowupEmailFields_(ss, enrollmentId, {'Follow Up Status': 'Parent Replied', 'Email Workflow Status': 'Parent Replied', 'Latest Reply Received At': reply['Received At'], 'Reply Status': 'Reply Received'});
-  return {ok: true, emailJobId, enrollmentId, status: 'Parent Replied'};
-}
-
-function scheduleReminder(request) {
-  const ss = getSpreadsheet_();
-  ensureEmailWorkflowInfrastructure_(ss);
-  const reminderId = nextId_('REMINDER');
-  const record = {
-    'ReminderID': reminderId,
-    'EmailJobID': request.emailJobId || '',
-    'EnrollmentID': request.enrollmentId || '',
-    'Reminder Number': request.reminderNumber || 1,
-    'Reminder Type': request.reminderType || 'Follow-Up Reminder',
-    'Scheduled Send At': request.scheduledSendAt || '',
-    'Approval Status': 'Pending Approval',
-    'Send Status': 'Draft',
-    'Sent At': '',
-    'Power Automate Run ID': '',
-    'Error Message': '',
-    'Created At': new Date(),
-    'Notes': request.notes || ''
-  };
-  appendObjectByHeaders_(ss.getSheetByName(REMINDER_QUEUE_SHEET), REMINDER_QUEUE_HEADERS, record);
-  updateFollowupEmailFields_(ss, record['EnrollmentID'], {'Reminder Status': 'Reminder Drafted', 'Next Reminder Date': record['Scheduled Send At']});
-  return buildAppDashboardData_(false);
-}
-
-function buildEmailMetrics_(outbox, logs, replies, reminders) {
-  outbox = outbox || [];
-  replies = replies || [];
-  reminders = reminders || [];
-  return {
-    drafts: outbox.filter(row => row['Send Status'] === 'Draft').length,
-    pendingApproval: outbox.filter(row => row['Approval Status'] === 'Pending Approval').length,
-    readyToSend: outbox.filter(row => row['Send Status'] === 'Ready To Send').length,
-    scheduled: outbox.filter(row => row['Send Status'] === 'Scheduled').length,
-    sent: outbox.filter(row => row['Send Status'] === 'Sent').length,
-    failed: outbox.filter(row => row['Send Status'] === 'Failed').length,
-    repliesReceived: replies.length,
-    remindersPending: reminders.filter(row => row['Send Status'] !== 'Sent').length
-  };
-}
-
-function findEmailTemplate_(ss, templateId) {
-  const templates = getEmailTemplates_(ss);
-  return templates.find(row => row['TemplateID'] === templateId) || templates[0] || {};
-}
-
-function buildEmailMergeContext_(ss, enrollmentId, emailJobId) {
-  const participants = buildProfessorDashboardData_(false).participants || [];
-  const participant = participants.find(p => p.enrollmentId === enrollmentId);
-  if (!participant) throw new Error(`EnrollmentID not found: ${enrollmentId}`);
-  const nameParts = String(participant.parentName || '').trim().split(/\s+/).filter(Boolean);
-  const childParts = String(participant.childName || '').trim().split(/\s+/).filter(Boolean);
-  return {
-    emailJobId: emailJobId || nextId_('EMAIL-PREVIEW'),
-    enrollmentId: participant.enrollmentId,
-    prescreeningId: '',
-    consentId: '',
-    childFullName: participant.childName || '',
-    childFirstName: childParts[0] || participant.childName || '',
-    parentFullName: participant.parentName || '',
-    parentFirstName: nameParts[0] || participant.parentName || 'there',
-    parentEmail: participant.parentEmail || '',
-    parentPhone: participant.parentPhone || '',
-    cohortId: participant.cohortId || '',
-    cohortName: participant.cohortName || '',
-    site: participant.site || '',
-    programTerm: participant.programTerm || '',
-    followupReason: participant.followUpStatus || '',
-    supportDetails: participant.supportDetails || ''
-  };
-}
-
-function buildEmailDraftPayload_(template, context) {
-  const subject = mergeTemplate_(template['Subject Template'] || 'Gaming4Good follow-up for {{child_first_name}}', context);
-  const body = mergeTemplate_(template['Body Template'] || '', context);
-  return {templateId: template['TemplateID'] || '', emailType: template['Email Type'] || '', subject, body, bodyHtml: textToHtml_(body), context};
-}
-
-function mergeTemplate_(template, context) {
-  const fields = {
-    email_job_id: context.emailJobId,
-    enrollment_id: context.enrollmentId,
-    parent_first_name: context.parentFirstName,
-    parent_full_name: context.parentFullName,
-    parent_email: context.parentEmail,
-    child_first_name: context.childFirstName,
-    child_full_name: context.childFullName,
-    cohort_id: context.cohortId,
-    cohort_name: context.cohortName,
-    site: context.site,
-    program_term: context.programTerm,
-    followup_reason: context.followupReason,
-    support_details: context.supportDetails
-  };
-  return String(template || '').replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_, key) => fields[String(key).toLowerCase()] || '');
-}
-
-function textToHtml_(text) {
-  return String(text || '').split(/\n{2,}/).map(p => `<p>${String(p).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')}</p>`).join('');
-}
-
-function updateFollowupEmailFields_(ss, enrollmentId, updates) {
-  const sheet = ss.getSheetByName(SHEETS.FOLLOWUP);
-  if (!sheet || !enrollmentId) return;
-  appendMissingHeaders_(sheet, Object.keys(updates));
-  const rowInfo = findRowByKey_(sheet, 'EnrollmentID', enrollmentId);
-  if (rowInfo.rowNumber) updateRowByHeader_(sheet, rowInfo.rowNumber, updates);
-  if (updates['Follow Up Status'] !== undefined) {
-    const masterSheet = ss.getSheetByName(SHEETS.MASTER);
-    const masterRow = findRowByKey_(masterSheet, 'EnrollmentID', enrollmentId);
-    if (masterRow.rowNumber) updateRowByHeader_(masterSheet, masterRow.rowNumber, {'Follow Up Status': updates['Follow Up Status']});
-  }
-}
-
-function getFollowupStatus_(ss, enrollmentId) {
-  const rowInfo = findRowByKey_(ss.getSheetByName(SHEETS.FOLLOWUP), 'EnrollmentID', enrollmentId);
-  return rowInfo.object && rowInfo.object['Follow Up Status'] || '';
-}
-
-function enrollmentIdForEmailJob_(ss, emailJobId) {
-  const rowInfo = findRowByKey_(ss.getSheetByName(EMAIL_OUTBOX_SHEET), 'EmailJobID', emailJobId);
-  return rowInfo.object && rowInfo.object['EnrollmentID'] || '';
-}
-
-function appendEmailLog_(ss, emailRecord, action, status, runId, rawResponse) {
-  appendObjectByHeaders_(ss.getSheetByName(EMAIL_LOG_SHEET), EMAIL_LOG_HEADERS, {
-    'LogID': nextId_('LOG'),
-    'Timestamp': new Date(),
-    'EmailJobID': emailRecord['EmailJobID'] || '',
-    'EnrollmentID': emailRecord['EnrollmentID'] || '',
-    'Parent Email': emailRecord['Parent Email'] || '',
-    'Child Full Name': emailRecord['Child Full Name'] || '',
-    'Email Type': emailRecord['Email Type'] || '',
-    'Subject': emailRecord['Email Subject'] || emailRecord['Subject'] || '',
-    'Action': action,
-    'Status': status,
-    'Sent By / Mailbox': '',
-    'Power Automate Run ID': runId || '',
-    'Error Message': emailRecord['Error Message'] || '',
-    'Raw Response': rawResponse || ''
-  });
-}
-
-function validatePowerAutomateSecret_(provided) {
-  const expected = PropertiesService.getScriptProperties().getProperty('POWER_AUTOMATE_SECRET') || getPowerAutomateConfigValue_('PowerAutomateCallbackSecret');
-  if (!expected) return true;
-  if (String(provided || '') !== String(expected)) throw new Error('Invalid Power Automate callback secret.');
-  return true;
-}
-
-function getPowerAutomateConfigValue_(setting) {
-  const ss = getSpreadsheet_();
-  const sheet = ss.getSheetByName(POWER_AUTOMATE_CONFIG_SHEET);
-  if (!sheet) return '';
-  const row = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW).find(r => r['Setting'] === setting);
-  return row ? row['Value'] : '';
-}
-
-function nextId_(prefix) {
-  return `${prefix}-${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd-HHmmss')}-${Math.floor(Math.random() * 10000)}`;
-}
-
-function findRowByKey_(sheet, keyField, keyValue) {
-  if (!sheet || !keyValue) return {rowNumber: 0, object: {}};
-  const values = sheet.getDataRange().getValues();
-  const headers = values[0].map(String);
-  const keyCol = headers.indexOf(keyField);
-  if (keyCol < 0) return {rowNumber: 0, object: {}};
-  for (let i = 1; i < values.length; i++) {
-    if (String(values[i][keyCol]) === String(keyValue)) {
-      const object = {};
-      headers.forEach((h, idx) => { if (h) object[h] = values[i][idx]; });
-      return {rowNumber: i + 1, object};
-    }
-  }
-  return {rowNumber: 0, object: {}};
-}
-
-function updateRowByHeader_(sheet, rowNumber, updates) {
-  appendMissingHeaders_(sheet, Object.keys(updates));
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
-  Object.entries(updates).forEach(([field, value]) => {
-    const col = headers.indexOf(field) + 1;
-    if (col > 0) sheet.getRange(rowNumber, col).setValue(value);
-  });
-}
-
-function upsertByKey_(sheet, headers, keyField, keyValue, record) {
-  appendMissingHeaders_(sheet, headers);
-  const rowInfo = findRowByKey_(sheet, keyField, keyValue);
-  if (rowInfo.rowNumber) {
-    if (!record['Created At']) delete record['Created At'];
-    updateRowByHeader_(sheet, rowInfo.rowNumber, record);
-  } else {
-    appendObjectByHeaders_(sheet, headers, record);
-  }
-}
-
-function appendObjectByHeaders_(sheet, headers, record) {
-  appendMissingHeaders_(sheet, headers);
-  const currentHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
-  sheet.appendRow(currentHeaders.map(header => record[header] === undefined ? '' : record[header]));
-}
 
 // ---------- Helpers ----------
 
@@ -1662,7 +1194,7 @@ function ensureRawCohortHeaders_(ss) {
 }
 
 function ensureCoreOutputHeaders_(ss) {
-  [SHEETS.PRESCREEN_CLEAN, SHEETS.CONSENT_CLEAN, SHEETS.MASTER, SHEETS.FOLLOWUP, SHEETS.READY, MATCH_REVIEW_SHEET, UNMATCHED_CONSENT_SHEET]
+  [SHEETS.PRESCREEN_CLEAN, SHEETS.CONSENT_CLEAN, SHEETS.SCREENING_REVIEW, SHEETS.ELIGIBLE, SHEETS.INELIGIBLE, SHEETS.MASTER, SHEETS.FOLLOWUP, SHEETS.READY, MATCH_REVIEW_SHEET, UNMATCHED_CONSENT_SHEET]
     .forEach(name => appendMissingHeaders_(ss.getSheetByName(name), COHORT_FIELDS));
 }
 
@@ -1786,7 +1318,7 @@ function writeTable_(sheet, records, keyField) {
 }
 
 function applyOutputFormatting_(sheet, dataRows, columns) {
-  if (![SHEETS.PRESCREEN_CLEAN, SHEETS.FOLLOWUP].includes(sheet.getName())) return;
+  if (![SHEETS.PRESCREEN_CLEAN, SHEETS.SCREENING_REVIEW, SHEETS.ELIGIBLE, SHEETS.INELIGIBLE, SHEETS.FOLLOWUP, SHEETS.MASTER, SHEETS.READY].includes(sheet.getName())) return;
   const rowsToFormat = Math.max(dataRows, Math.max(0, sheet.getLastRow() - 1), 1);
   const range = sheet.getRange(2, 1, rowsToFormat, columns);
   range.setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP).setVerticalAlignment('middle');
@@ -2002,6 +1534,7 @@ function gradeCompatible_(a, b) {
 
 function normalizePhoneDigits_(v) { return String(v || '').replace(/\D/g, '').slice(-10); }
 function isReadyWithMatch_(needed, status, consentStatus, match) { return match.accepted && isReady_(needed, status, consentStatus) === 'Yes' ? 'Yes' : (match.needsReview ? 'Review' : 'No'); }
+function isReadyWithEligibility_(decision, consentStatus, match) { return decision === 'Approved Eligible' && match.accepted && consentStatus === 'Completed' ? 'Yes' : (match.needsReview ? 'Review' : 'No'); }
 
 function readManualFollowupState_(sheet) {
   const rows = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW);

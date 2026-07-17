@@ -25,7 +25,7 @@
 </head>
 <body>
   <h1>G4G Enrollment Tracker</h1>
-  <p>Use this panel to refresh the Sheet after raw QuestionPro rows are imported or after follow-up statuses are updated.</p>
+  <p>Use this panel to refresh the Sheet after raw QuestionPro rows are imported or after eligibility screening decisions are updated.</p>
 
   <button id="refreshButton" onclick="refreshTracker()">Refresh tracker</button>
   <div id="status" class="status">Loading current counts…</div>
@@ -38,9 +38,11 @@
   <div class="card" id="summaryCard" style="display:none;">
     <div class="metric"><span class="label">Prescreening clean rows</span><span class="value" id="prescreening">0</span></div>
     <div class="metric"><span class="label">Consent clean rows</span><span class="value" id="consent">0</span></div>
+    <div class="metric"><span class="label">Screening review rows</span><span class="value" id="screeningReview">0</span></div>
+    <div class="metric"><span class="label">Approved eligible</span><span class="value" id="eligible">0</span></div>
+    <div class="metric"><span class="label">Marked ineligible</span><span class="value" id="ineligible">0</span></div>
     <div class="metric"><span class="label">Master records</span><span class="value" id="master">0</span></div>
-    <div class="metric"><span class="label">Follow-up needed</span><span class="value" id="followupNeeded">0</span></div>
-    <div class="metric"><span class="label">Follow-up completed</span><span class="value" id="followupCompleted">0</span></div>
+    <div class="metric"><span class="label">Manual contact needed</span><span class="value" id="followupNeeded">0</span></div>
     <div class="metric"><span class="label">Ready for DARTS</span><span class="value" id="readyForDarts">0</span></div>
   </div>
 
@@ -49,9 +51,9 @@
     <ol>
       <li>Open the Google Sheet, then run <strong>G4G Tracker → Refresh tracker from raw tabs</strong> once.</li>
       <li>Confirm the raw tabs have the QuestionPro header row in row 2 and response data starting in row 3.</li>
-      <li>Import one prescreening export row into <code>Prescreening_Raw</code>, refresh, and confirm it appears in <code>Prescreening_Clean</code> and <code>Master_Enrollment</code>.</li>
-      <li>If the row says the child is <strong>not</strong> neurodivergent/support-identified, confirm it appears in <code>Followup_Queue</code> for clarification follow-up.</li>
-      <li>Import one matching consent export row into <code>Consent_Raw</code>, refresh, and confirm consent status updates in <code>Master_Enrollment</code>.</li>
+      <li>Import one prescreening export row into <code>Prescreening_Raw</code>, refresh, and confirm it appears in <code>Prescreening_Clean</code> and <code>Screening_Review</code>.</li>
+      <li>Review the row in the web dashboard or <code>Screening_Review</code>, then approve eligible participants into <code>Eligible_Participants</code> or mark them ineligible.</li>
+      <li>Import one matching consent export row into <code>Consent_Raw</code>, refresh, and confirm consent matching updates only for approved eligible participants in <code>Master_Enrollment</code>.</li>
     </ol>
   </div>
 
@@ -66,7 +68,7 @@
     <input id="cohortWebhookUrl" readonly value="Loading URL…" onclick="this.select()">
     <ul>
       <li>Prescreening form webhook → URL ending in <code>?form=prescreening</code> → response should land in <code>Prescreening_Raw</code>.</li>
-      <li>For cohort-specific prescreeners, add query values such as <code>&cohort_id=COHORT-01&cohort_name=Cohort%201&site=UGA&program_term=Summer%202026</code>. These values flow into clean, master, follow-up, ready, and dashboard views.</li>
+      <li>For cohort-specific prescreeners, add query values such as <code>&cohort_id=COHORT-01&cohort_name=Cohort%201&site=UGA&program_term=Summer%202026</code>. These values flow into clean, screening, eligible/ineligible, master, ready, and dashboard views.</li>
       <li>Consent form webhook → URL ending in <code>?form=consent</code> → response should land in <code>Consent_Raw</code>.</li>
       <li>If QuestionPro asks for content type, choose <code>application/json</code>.</li>
       <li>After saving each webhook, submit a test response and click <strong>Refresh tracker</strong>.</li>
@@ -77,9 +79,10 @@
     <h2>Phase 1 use</h2>
     <ul>
       <li>Keep raw tabs as the audit trail.</li>
-      <li>Work follow-ups from <code>Followup_Queue</code>.</li>
-      <li>Manually update follow-up status/date/assignee/notes in the queue.</li>
-      <li>Use the web dashboard Email Center to draft/approve email jobs; Power Automate + Outlook will send only approved outbox rows once configured.</li>
+      <li>Use <code>Screening_Review</code> and the web dashboard to make human eligibility decisions.</li>
+      <li>Approved participants move into <code>Eligible_Participants</code> and then into <code>Master_Enrollment</code> for consent matching.</li>
+      <li>Participants marked ineligible move into <code>Ineligible_Participants</code>.</li>
+      <li>Email automation has been removed; any parent outreach is tracked manually.</li>
     </ul>
   </div>
 
@@ -111,7 +114,7 @@
     }
 
     function renderSummary(summary) {
-      ['prescreening', 'consent', 'master', 'followupNeeded', 'followupCompleted', 'readyForDarts'].forEach(function (key) {
+      ['prescreening', 'consent', 'screeningReview', 'eligible', 'ineligible', 'master', 'followupNeeded', 'readyForDarts'].forEach(function (key) {
         document.getElementById(key).textContent = summary[key];
       });
       document.getElementById('summaryCard').style.display = 'block';
