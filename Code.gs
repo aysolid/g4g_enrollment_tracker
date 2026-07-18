@@ -377,10 +377,11 @@ function buildAppDashboardData_(shouldRefresh) {
   const screening = readObjectsOrEmpty_(ss, SHEETS.SCREENING_REVIEW);
   const eligibleParticipants = readObjectsOrEmpty_(ss, SHEETS.ELIGIBLE);
   const ineligibleParticipants = readObjectsOrEmpty_(ss, SHEETS.INELIGIBLE);
+  const consentNotSubmitted = buildConsentNotSubmittedParticipants_(professor.participants);
   const payload = {
     generatedAt: new Date().toISOString(),
     spreadsheetName: ss.getName(),
-    metrics: buildCommandCenterMetrics_(professor.summary, dashboardRows, matchReview, unmatchedConsents, screening, eligibleParticipants, ineligibleParticipants),
+    metrics: buildCommandCenterMetrics_(professor.summary, dashboardRows, matchReview, unmatchedConsents, screening, eligibleParticipants, ineligibleParticipants, consentNotSubmitted),
     dashboardRows,
     participants: professor.participants,
     screening,
@@ -393,6 +394,7 @@ function buildAppDashboardData_(shouldRefresh) {
     unmatchedConsents,
     prescreens,
     consents,
+    consentNotSubmitted,
     master,
     cohorts: buildCohortSummaries_(ss, professor.participants, prescreens, consents),
     rawCounts: {
@@ -428,7 +430,21 @@ function readDashboardMetricRows_(ss) {
   }));
 }
 
-function buildCommandCenterMetrics_(summary, dashboardRows, matchReview, unmatchedConsents, screening, eligible, ineligible) {
+
+function buildConsentNotSubmittedParticipants_(participants) {
+  return (participants || []).filter(participant => {
+    const eligibilityDecision = String(participant.humanEligibilityDecision || '').trim();
+    const consentStatus = String(participant.consentStatus || '').trim();
+    return eligibilityDecision === 'Approved Eligible' && !isSubmittedConsentStatus_(consentStatus);
+  });
+}
+
+function isSubmittedConsentStatus_(status) {
+  const value = String(status || '').toLowerCase();
+  return /completed|consented|submitted|received/.test(value);
+}
+
+function buildCommandCenterMetrics_(summary, dashboardRows, matchReview, unmatchedConsents, screening, eligible, ineligible, consentNotSubmitted) {
   const metricMap = new Map(dashboardRows.map(row => [row.metric, row.value]));
   return {
     prescreened: metricMap.get('Total Prescreening Submitted') || summary.prescreened || 0,
@@ -442,6 +458,7 @@ function buildCommandCenterMetrics_(summary, dashboardRows, matchReview, unmatch
     manualContactNeeded: metricMap.get('Manual Contact Needed') || summary.followUpNeeded || 0,
     manualContactCompleted: metricMap.get('Manual Contact Completed') || summary.followUpCompleted || 0,
     consentCompleted: metricMap.get('Consent Completed') || summary.consentCompleted || 0,
+    consentNotSubmitted: (consentNotSubmitted || []).length,
     readyForDarts: metricMap.get('Ready for DARTS') || summary.readyForDarts || 0,
     needsReview: metricMap.get('Needs Review') || summary.needsReview || 0,
     matchReviewNeeded: matchReview.length,
@@ -473,6 +490,7 @@ function buildReportData_(participants, followups, matchReview, unmatchedConsent
       {label: 'Eligibility pending review', value: (screening || []).filter(row => !row['Human Eligibility Decision'] || row['Human Eligibility Decision'] === 'Pending Review').length},
       {label: 'Needs more information', value: (screening || []).filter(row => row['Human Eligibility Decision'] === 'Needs More Information').length},
       {label: 'Approved eligible', value: (eligible || []).length},
+      {label: 'Consent not submitted', value: buildConsentNotSubmittedParticipants_(participants).length},
       {label: 'Marked ineligible', value: (ineligible || []).length},
       {label: 'Match review needed', value: matchReview.length},
       {label: 'Unmatched consent records', value: unmatchedConsents.length},
@@ -626,6 +644,7 @@ function buildProfessorSummary_(participants, prescreens, consents, ready, ss, m
     prescreened: prescreens.length,
     consentSubmitted: consents.length,
     consentCompleted: consents.filter(row => row['Consent Status'] === 'Completed').length,
+    consentNotSubmitted: buildConsentNotSubmittedParticipants_(participants).length,
     masterRecords: (master || []).length,
     neurodivergentYes: participants.filter(p => p.neurodivergentResponse === 'Yes').length,
     neurodivergentNo: participants.filter(p => p.neurodivergentResponse === 'No').length,
