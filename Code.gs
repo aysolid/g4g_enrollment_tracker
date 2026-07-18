@@ -1058,8 +1058,8 @@ function buildMasterEnrollment_(eligibleRows, consents, config, manualMatchByEnr
       'Match Reasons': match.reasons.join('; '),
       'Needs Match Review': match.needsReview ? 'Yes' : 'No',
       'Possible Consent Matches': match.possibleMatches,
-      'Manual Consent ResponseID': manualMatch['Manual Consent ResponseID'] || '',
-      'Manual Match Notes': manualMatch['Manual Match Notes'] || '',
+      'Manual Consent ResponseID': match.manualConsentResponseId || '',
+      'Manual Match Notes': match.manualMatchNotes || '',
       'Last Updated': new Date(),
       'Notes': p['Notes'] || ''
     };
@@ -1456,6 +1456,7 @@ function readManualMatchState_(sheet) {
 
 function selectConsentMatch_(prescreen, consents, manualMatch) {
   const manualConsentId = String(manualMatch['Manual Consent ResponseID'] || '').trim();
+  let ignoredManualReason = '';
   if (manualConsentId) {
     const manualConsent = consents.find(c => String(c['ResponseID'] || '') === manualConsentId);
     if (manualConsent) return {
@@ -1465,17 +1466,14 @@ function selectConsentMatch_(prescreen, consents, manualMatch) {
       score: 100,
       reasons: ['Manual Consent ResponseID override'],
       needsReview: false,
-      possibleMatches: describeConsentMatch_(manualConsent, 100, ['Manual Consent ResponseID override'])
+      possibleMatches: describeConsentMatch_(manualConsent, 100, ['Manual Consent ResponseID override']),
+      manualConsentResponseId: manualConsentId,
+      manualMatchNotes: manualMatch['Manual Match Notes'] || ''
     };
-    return {
-      consent: null,
-      accepted: false,
-      status: 'Manual Match Missing',
-      score: 0,
-      reasons: [`Manual Consent ResponseID not found: ${manualConsentId}`],
-      needsReview: true,
-      possibleMatches: ''
-    };
+    // If an old manual override points to a consent response that no longer exists,
+    // do not keep the participant stuck in Match_Review. Ignore the stale override
+    // and let the normal 60+ auto-match rule run against current Consent_Clean data.
+    ignoredManualReason = `Ignored stale Manual Consent ResponseID not found: ${manualConsentId}`;
   }
 
   const ranked = rankConsentMatches_(prescreen, consents);
@@ -1484,15 +1482,16 @@ function selectConsentMatch_(prescreen, consents, manualMatch) {
     accepted: false,
     status: 'No Consent Yet',
     score: 0,
-    reasons: ['No submitted consent record shares enough identifiers with this prescreening record'],
+    reasons: ignoredManualReason ? [ignoredManualReason, 'No submitted consent record shares enough identifiers with this prescreening record'] : ['No submitted consent record shares enough identifiers with this prescreening record'],
     needsReview: false,
-    possibleMatches: ''
+    possibleMatches: '',
+    manualConsentResponseId: '',
+    manualMatchNotes: ignoredManualReason
   };
 
   const best = ranked[0];
   const second = ranked[1];
   const closeSecond = second && best.score - second.score < 10;
-  const strongIdentifier = best.reasons.some(reason => /email exact|phone exact/i.test(reason));
   // Study-team rule: any score of 60 or higher is accepted automatically.
   // Lower-confidence matches remain visible in Match_Review for manual approval.
   const accepted = best.score >= 60;
@@ -1502,9 +1501,11 @@ function selectConsentMatch_(prescreen, consents, manualMatch) {
     accepted,
     status: accepted ? 'Matched' : (needsReview ? 'Needs Review' : 'No Consent Yet'),
     score: best.score,
-    reasons: closeSecond && !accepted ? best.reasons.concat(['Another consent record has a similar score; manual review recommended']) : best.reasons,
+    reasons: (ignoredManualReason ? [ignoredManualReason] : []).concat(closeSecond && !accepted ? best.reasons.concat(['Another consent record has a similar score; manual review recommended']) : best.reasons),
     needsReview: needsReview || (!accepted && Boolean(closeSecond)),
-    possibleMatches: ranked.slice(0, 3).map(item => describeConsentMatch_(item.consent, item.score, item.reasons)).join(' | ')
+    possibleMatches: ranked.slice(0, 3).map(item => describeConsentMatch_(item.consent, item.score, item.reasons)).join(' | '),
+    manualConsentResponseId: '',
+    manualMatchNotes: ignoredManualReason
   };
 }
 
@@ -1597,7 +1598,7 @@ function gradeCompatible_(a, b) {
 
 function normalizePhoneDigits_(v) { return String(v || '').replace(/\D/g, '').slice(-10); }
 function isReadyWithMatch_(needed, status, consentStatus, match) { return match.accepted && isReady_(needed, status, consentStatus) === 'Yes' ? 'Yes' : (match.needsReview ? 'Review' : 'No'); }
-function isReadyWithEligibility_(decision, consentStatus, match) { return decision === 'Approved Eligible' && match.accepted && consentStatus === 'Completed' ? 'Yes' : (match.needsReview ? 'Review' : 'No'); }
+function isReadyWithEligibility_(decision, consentStatus, match) { return decision === 'Approved Eligible' ? 'Yes' : 'No'; }
 
 function readManualFollowupState_(sheet) {
   const rows = readObjects_(sheet, CLEAN_HEADER_ROW, DATA_START_ROW);
