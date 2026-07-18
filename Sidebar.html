@@ -75,6 +75,14 @@
     </ul>
   </div>
 
+
+  <div class="card">
+    <h2>Workbook cleanup</h2>
+    <p>After this no-email revision, old email automation and Power Automate sheets are no longer used.</p>
+    <button id="cleanupButton" onclick="cleanupDeprecatedSheets()">Delete old email/Power Automate sheets</button>
+    <div id="cleanupStatus" class="status"></div>
+  </div>
+
   <div class="card">
     <h2>Phase 1 use</h2>
     <ul>
@@ -124,6 +132,27 @@
       document.getElementById('cohortWebhookUrl').value = prescreenUrl + '&cohort_id=COHORT-01&cohort_name=Cohort%201&site=UGA&program_term=Summer%202026';
       renderSetup(summary.setup);
       setBusy(false, 'Last updated: ' + new Date(summary.generatedAt).toLocaleString());
+    }
+
+
+    function cleanupDeprecatedSheets() {
+      const button = document.getElementById('cleanupButton');
+      const status = document.getElementById('cleanupStatus');
+      button.disabled = true;
+      status.className = 'status';
+      status.textContent = 'Deleting old email/Power Automate sheets…';
+      google.script.run
+        .withSuccessHandler(function (result) {
+          button.disabled = false;
+          status.className = 'status ok';
+          status.textContent = 'Deleted: ' + ((result.deleted || []).join(', ') || 'none') + '. Skipped: ' + ((result.skipped || []).join(', ') || 'none') + '.';
+        })
+        .withFailureHandler(function (error) {
+          button.disabled = false;
+          status.className = 'status error';
+          status.textContent = error && error.message ? error.message : String(error);
+        })
+        .cleanupDeprecatedEmailAutomationSheetsFromSidebar();
     }
 
     function refreshTracker() {

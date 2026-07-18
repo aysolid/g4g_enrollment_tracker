@@ -80,6 +80,12 @@ const UNMATCHED_CONSENT_HEADERS = [
   'Best Match Score', 'Match Reasons', 'Review Status', 'Notes'
 ];
 
+const DEPRECATED_EMAIL_WORKFLOW_SHEETS = [
+  'Email_Templates', 'Email_Outbox', 'Email_Log', 'Reply_Log', 'Reminder_Queue',
+  'Power_Automate_Config', 'PA_Email_Outbox', 'PA_Send_Status', 'PA_Reply_Import',
+  'PA_Email_Status', 'PA_Reply_Log'
+];
+
 function getSpreadsheet_() {
   const active = SpreadsheetApp.getActiveSpreadsheet();
   if (active) {
@@ -106,10 +112,53 @@ function onOpen() {
     .addItem('Install raw-tab automation', 'installRawTabAutomation')
     .addItem('Rebuild dashboard counts', 'refreshDashboard')
     .addSeparator()
+    .addItem('Clean up removed email/Power Automate sheets', 'cleanupDeprecatedEmailAutomationSheets')
+    .addSeparator()
     .addItem('Run self-test with sample rows', 'runPhaseOneSelfTest')
     .addToUi();
 }
 
+
+
+function cleanupDeprecatedEmailAutomationSheets() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert(
+    'Clean up removed email/Power Automate sheets?',
+    'This will permanently delete old email automation sheets such as Email_Outbox, Email_Log, Reply_Log, Reminder_Queue, Power_Automate_Config, and PA_* bridge sheets. Current enrollment, screening, matching, cohort, and DARTS sheets will not be removed.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response !== ui.Button.OK) return {deleted: [], skipped: [], cancelled: true};
+  const result = cleanupDeprecatedEmailAutomationSheets_();
+  ui.alert('Cleanup complete', `Deleted sheets: ${result.deleted.join(', ') || 'none'}
+Skipped sheets: ${result.skipped.join(', ') || 'none'}`, ui.ButtonSet.OK);
+  return result;
+}
+
+function cleanupDeprecatedEmailAutomationSheetsFromSidebar() {
+  return cleanupDeprecatedEmailAutomationSheets_();
+}
+
+function cleanupDeprecatedEmailAutomationSheets_() {
+  const ss = getSpreadsheet_();
+  const deprecatedNames = new Set(DEPRECATED_EMAIL_WORKFLOW_SHEETS);
+  const shouldDelete = sheetName => deprecatedNames.has(sheetName) || /^PA_/i.test(sheetName);
+  const deleted = [];
+  const skipped = [];
+  const safeActiveSheet = ss.getSheets().find(sheet => !shouldDelete(sheet.getName()));
+  if (safeActiveSheet) ss.setActiveSheet(safeActiveSheet);
+
+  ss.getSheets().slice().forEach(sheet => {
+    const name = sheet.getName();
+    if (!shouldDelete(name)) return;
+    if (ss.getSheets().length <= 1) {
+      skipped.push(`${name} (cannot delete the only sheet)`);
+      return;
+    }
+    ss.deleteSheet(sheet);
+    deleted.push(name);
+  });
+  return {deleted, skipped, cleanedAt: new Date().toISOString()};
+}
 
 /** Opens a lightweight Sheets sidebar for the Phase 1 tracker controls. */
 function showTrackerSidebar() {
